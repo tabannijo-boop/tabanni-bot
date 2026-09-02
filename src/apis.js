@@ -54,4 +54,34 @@ async function getClaudeReply(history) {
     "Hello! Thank you for reaching out — a team member will follow up with you shortly. 🐾";
 }
 
-module.exports = { sendInstagramMessage, getClaudeReply };
+// Pings your team on Telegram when a conversation gets flagged for a human
+// (someone asked for Sereen/a human, or the bot hit something it can't
+// answer). Silently does nothing if the env vars aren't set, so this is
+// safe to leave in even before you've set up the Telegram bot.
+async function sendTelegramNotification(text) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.log('(Telegram not configured — skipping notification. See README to set it up.)');
+    return false;
+  }
+
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Telegram notification failed:', res.status, errBody);
+    }
+    return res.ok;
+  } catch (err) {
+    console.error('Telegram notification error:', err);
+    return false;
+  }
+}
+
+module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification };

@@ -8,7 +8,7 @@ const {
   addAssistantMessage,
   getHistory,
 } = require('./conversationState');
-const { sendInstagramMessage, getClaudeReply } = require('./apis');
+const { sendInstagramMessage, getClaudeReply, sendTelegramNotification } = require('./apis');
 
 const app = express();
 app.use(express.json());
@@ -30,6 +30,10 @@ app.post('/api/test-chat', async (req, res) => {
     if (reply.startsWith(HANDOFF_MARKER)) {
       handoff = true;
       outgoingText = reply.slice(HANDOFF_MARKER.length).trim();
+      const lastUserMsg = [...history].reverse().find(m => m.role === 'user');
+      await sendTelegramNotification(
+        `🧪 [TEST PAGE] tabanni bot flagged a conversation for a volunteer.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`
+      );
     }
     res.json({ reply: outgoingText, handoff });
   } catch (err) {
@@ -119,10 +123,10 @@ async function handleMessagingEvent(event) {
 
   if (needsHandoff) {
     setManualPause(senderId, true);
-    // TODO: once you're ready, replace this log with a real notification —
-    // e.g. an email via a transactional mail API, or a Slack/WhatsApp
-    // webhook — so a volunteer actually sees this instead of only the logs.
-    console.log(`⚠️ Conversation with ${senderId} flagged for a volunteer — bot paused. Reply manually, then resume via /admin/resume when done.`);
+    console.log(`⚠️ Conversation with ${senderId} flagged for a volunteer — bot paused.`);
+    await sendTelegramNotification(
+      `🐾 tabanni bot needs a volunteer!\n\nConversation ID: ${senderId}\nLast message from them: "${userText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
+    );
   }
 }
 

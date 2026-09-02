@@ -8,7 +8,7 @@ const {
   addAssistantMessage,
   getHistory,
 } = require('./conversationState');
-const { sendInstagramMessage, getClaudeReply, sendTelegramNotification } = require('./apis');
+const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile } = require('./apis');
 
 const app = express();
 app.use(express.json());
@@ -124,8 +124,14 @@ async function handleMessagingEvent(event) {
   if (needsHandoff) {
     setManualPause(senderId, true);
     console.log(`⚠️ Conversation with ${senderId} flagged for a volunteer — bot paused.`);
+
+    const profile = await getInstagramUserProfile(senderId);
+    const displayName = profile?.username
+      ? `@${profile.username}`
+      : (profile?.name || `IGSID ${senderId}`);
+
     await sendTelegramNotification(
-      `🐾 tabanni bot needs a volunteer!\n\nConversation ID: ${senderId}\nLast message from them: "${userText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
+      `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${userText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
     );
   }
 }

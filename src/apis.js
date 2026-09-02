@@ -84,4 +84,24 @@ async function sendTelegramNotification(text) {
   }
 }
 
-module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification };
+// Looks up the sender's Instagram username/name from their IGSID, so
+// notifications are readable instead of just showing a numeric ID.
+// Returns null if the lookup fails — callers should fall back gracefully.
+async function getInstagramUserProfile(psid) {
+  const url = `https://graph.instagram.com/v21.0/${psid}?fields=name,username&access_token=${process.env.PAGE_ACCESS_TOKEN}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Instagram profile lookup failed:', res.status, errBody);
+      return null;
+    }
+    const data = await res.json();
+    return { username: data.username || null, name: data.name || null };
+  } catch (err) {
+    console.error('Instagram profile lookup error:', err);
+    return null;
+  }
+}
+
+module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile };

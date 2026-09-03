@@ -7,12 +7,47 @@ const {
   addUserMessage,
   addAssistantMessage,
   getHistory,
+  markBotMessageId,
+  wasSentByBot,
 } = require('./conversationState');
-const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile } = require('./apis');
+const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo } = require('./apis');
 
 const app = express();
 app.use(express.json());
 app.use(express.static('public'));
+
+// Instagram rejects any single message over 1000 characters. Rather than let
+// that fail outright, split long replies into multiple messages sent one
+// after another, breaking at paragraph/sentence/word boundaries so it still
+// reads naturally instead of getting cut mid-word.
+const INSTAGRAM_MAX_MESSAGE_LENGTH = 950; // a little under 1000 for safety margin
+function splitForInstagram(text, maxLen = INSTAGRAM_MAX_MESSAGE_LENGTH) {
+  if (text.length <= maxLen) return [text];
+  const chunks = [];
+  let remaining = text.trim();
+  while (remaining.length > maxLen) {
+    let splitAt = remaining.lastIndexOf('\n\n', maxLen);
+    if (splitAt < maxLen * 0.4) splitAt = remaining.lastIndexOf('\n', maxLen);
+    if (splitAt < maxLen * 0.4) splitAt = remaining.lastIndexOf('. ', maxLen);
+    if (splitAt > 0 && remaining[splitAt] === '.') splitAt += 1; // keep the period with the chunk
+    if (splitAt < maxLen * 0.4) splitAt = remaining.lastIndexOf(' ', maxLen);
+    if (splitAt <= 0) splitAt = maxLen; // last resort: hard cut
+    chunks.push(remaining.slice(0, splitAt).trim());
+    remaining = remaining.slice(splitAt).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+// Sends a (possibly long) reply to Instagram as one or more messages, and
+// marks every chunk's message ID so the bot recognizes its own echoes.
+async function sendInstagramReply(senderId, text) {
+  const chunks = splitForInstagram(text);
+  for (const chunk of chunks) {
+    const sendResult = await sendInstagramMessage(senderId, chunk);
+    markBotMessageId(sendResult?.messageId);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Team test page — a simple web chat at /test.html for your team to try the
@@ -85,17 +120,43 @@ async function handleMessagingEvent(event) {
   const message = event.message;
   if (!message || !senderId) return;
 
-  // --- Human handoff: is this message an "echo" of something YOU sent ---
-  // manually from the Instagram app (not the bot)? If so, pause the bot on
-  // this conversation instead of treating it as a customer message.
+  // --- Human handoff: is this message an "echo" of something a HUMAN sent ---
+  // manually from the Instagram app? Instagram echoes back EVERY message sent
+  // from your account, including the bot's own replies — so we check whether
+  // this specific message ID is one the bot just sent itself. If so, ignore
+  // it silently. If it's an echo the bot doesn't recognize, a human really
+  // did send it manually, so pause the bot on this conversation.
   if (message.is_echo) {
+    if (wasSentByBot(message.mid)) {
+      return; // this is just our own reply bouncing back — not a human reply
+    }
     pauseAfterHumanReply(senderId);
     console.log(`Detected manual reply to ${senderId} — pausing bot for this conversation.`);
     return;
   }
 
   const userText = message.text;
-  if (!userText) return; // ignore stickers/attachments-only messages for now
+
+  // --- Photo/video forwarding: if they sent media (adoption-story photos, ---
+  // injured-animal photos, lost/found photos, etc.), forward it straight to
+  // Telegram so the team has it ready to grab, regardless of whether there's
+  // also text in this message.
+  if (Array.isArray(message.attachments) && message.attachments.length > 0) {
+    const profile = await getInstagramUserProfile(senderId);
+    const displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
+    for (const att of message.attachments) {
+      const attUrl = att?.payload?.url;
+      if (!attUrl) continue;
+      const caption = `📸 From ${displayName}${userText ? `\n"${userText}"` : ''}`;
+      if (att.type === 'image') {
+        await sendTelegramPhoto(caption, attUrl);
+      } else if (att.type === 'video') {
+        await sendTelegramVideo(caption, attUrl);
+      }
+    }
+  }
+
+  if (!userText) return; // ignore attachment-only messages for the text/reply logic below
 
   addUserMessage(senderId, userText);
 
@@ -119,7 +180,7 @@ async function handleMessagingEvent(event) {
     outgoingText = reply.slice(HANDOFF_MARKER.length).trim();
   }
 
-  await sendInstagramMessage(senderId, outgoingText);
+  await sendInstagramReply(senderId, outgoingText);
 
   if (needsHandoff) {
     setManualPause(senderId, true);

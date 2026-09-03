@@ -49,6 +49,21 @@ async function sendInstagramReply(senderId, text) {
   }
 }
 
+// The [[INTAKE]] marker is different from [[HANDOFF]] and [[FLAG]]: it wraps
+// a structured summary block, followed by the actual reply to send the
+// person. Format: [[INTAKE]]...summary...[[/INTAKE]]reply text here
+// Returns null if the reply doesn't start with [[INTAKE]] or is malformed.
+const INTAKE_MARKER_START = '[[INTAKE]]';
+const INTAKE_MARKER_END = '[[/INTAKE]]';
+function parseIntakeMarker(reply) {
+  if (!reply.startsWith(INTAKE_MARKER_START)) return null;
+  const endIdx = reply.indexOf(INTAKE_MARKER_END);
+  if (endIdx === -1) return null;
+  const summary = reply.slice(INTAKE_MARKER_START.length, endIdx).trim();
+  const outgoingText = reply.slice(endIdx + INTAKE_MARKER_END.length).trim();
+  return { summary, outgoingText };
+}
+
 // ---------------------------------------------------------------------------
 // Team test page — a simple web chat at /test.html for your team to try the
 // bot's brain in a browser, no Instagram or Claude account needed. The
@@ -60,17 +75,32 @@ app.post('/api/test-chat', async (req, res) => {
     const history = Array.isArray(req.body.history) ? req.body.history : [];
     const reply = await getClaudeReply(history);
     const HANDOFF_MARKER = '[[HANDOFF]]';
+    const FLAG_MARKER = '[[FLAG]]';
     let outgoingText = reply;
     let handoff = false;
-    if (reply.startsWith(HANDOFF_MARKER)) {
+    let intake = false;
+    const lastUserMsg = [...history].reverse().find(m => m.role === 'user');
+
+    const intakeParsed = parseIntakeMarker(reply);
+    if (intakeParsed) {
+      intake = true;
+      outgoingText = intakeParsed.outgoingText;
+      await sendTelegramNotification(
+        `🧪🐾🆕 [TEST PAGE] New adoption intake ready to post!\n\n${intakeParsed.summary}\n\nThis came from the /test.html team test page, not real Instagram.`
+      );
+    } else if (reply.startsWith(HANDOFF_MARKER)) {
       handoff = true;
       outgoingText = reply.slice(HANDOFF_MARKER.length).trim();
-      const lastUserMsg = [...history].reverse().find(m => m.role === 'user');
       await sendTelegramNotification(
         `🧪 [TEST PAGE] tabanni bot flagged a conversation for a volunteer.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`
       );
+    } else if (reply.startsWith(FLAG_MARKER)) {
+      outgoingText = reply.slice(FLAG_MARKER.length).trim();
+      await sendTelegramNotification(
+        `🧪🚩 [TEST PAGE] tabanni bot flagged a message for awareness (no pause).\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`
+      );
     }
-    res.json({ reply: outgoingText, handoff });
+    res.json({ reply: outgoingText, handoff, intake });
   } catch (err) {
     console.error('Test chat error:', err);
     res.status(500).json({ reply: "Something went wrong — check server logs.", handoff: false });
@@ -173,11 +203,25 @@ async function handleMessagingEvent(event) {
   // marker, send the warm acknowledgement anyway, then pause the bot on
   // this conversation so a volunteer picks up the actual answer.
   const HANDOFF_MARKER = '[[HANDOFF]]';
+  // --- Soft flag: notifies the team on Telegram but does NOT pause the ---
+  // bot. Used for things the team should be aware of (e.g. a report of
+  // animal cruelty) while the bot keeps handling the conversation normally.
+  const FLAG_MARKER = '[[FLAG]]';
   let outgoingText = reply;
   let needsHandoff = false;
-  if (reply.startsWith(HANDOFF_MARKER)) {
+  let needsFlag = false;
+  let intakeSummary = null;
+
+  const intakeParsed = parseIntakeMarker(reply);
+  if (intakeParsed) {
+    intakeSummary = intakeParsed.summary;
+    outgoingText = intakeParsed.outgoingText;
+  } else if (reply.startsWith(HANDOFF_MARKER)) {
     needsHandoff = true;
     outgoingText = reply.slice(HANDOFF_MARKER.length).trim();
+  } else if (reply.startsWith(FLAG_MARKER)) {
+    needsFlag = true;
+    outgoingText = reply.slice(FLAG_MARKER.length).trim();
   }
 
   await sendInstagramReply(senderId, outgoingText);
@@ -193,6 +237,28 @@ async function handleMessagingEvent(event) {
 
     await sendTelegramNotification(
       `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${userText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
+    );
+  } else if (needsFlag) {
+    console.log(`🚩 Conversation with ${senderId} flagged for awareness — bot is still replying normally.`);
+
+    const profile = await getInstagramUserProfile(senderId);
+    const displayName = profile?.username
+      ? `@${profile.username}`
+      : (profile?.name || `IGSID ${senderId}`);
+
+    await sendTelegramNotification(
+      `🚩 tabanni bot flagged a message for awareness (bot is still handling this conversation, no action needed unless you want to step in).\n\nFrom: ${displayName}\nMessage: "${userText}"`
+    );
+  } else if (intakeSummary) {
+    console.log(`🆕 Adoption intake ready for ${senderId} — sent to Telegram.`);
+
+    const profile = await getInstagramUserProfile(senderId);
+    const displayName = profile?.username
+      ? `@${profile.username}`
+      : (profile?.name || `IGSID ${senderId}`);
+
+    await sendTelegramNotification(
+      `🐾🆕 New adoption intake ready to post!\n\nFrom: ${displayName}\n\n${intakeSummary}\n\n(Any photos or videos they sent should already be forwarded above in this chat, or check earlier in this conversation.)`
     );
   }
 }

@@ -1,5 +1,23 @@
 const { SYSTEM_PROMPT } = require('./knowledge');
 
+// --- Telegram send queue -----------------------------------------------
+// Multiple Instagram conversations can trigger Telegram sends around the
+// same moment (e.g. two intakes finishing seconds apart). server.js wraps
+// each conversation's whole block of related messages (summary, image,
+// spacer) in one queueTelegramCall() so the block runs as a single atomic
+// unit — never split apart by another conversation's messages landing in
+// between. Individual send functions below use plain fetch(), NOT this
+// queue directly — nesting the queue inside itself (a block calling a
+// queued function that queues itself again) would deadlock, since the
+// inner call would wait for the outer block to finish, which is itself
+// waiting on that inner call.
+let telegramQueue = Promise.resolve();
+function queueTelegramCall(fn) {
+  const run = telegramQueue.then(fn, fn); // run fn regardless of the previous call's outcome
+  telegramQueue = run.catch(() => {}); // keep the chain alive even if one call fails
+  return run;
+}
+
 // Sends a text reply to a user on Instagram via the Graph API.
 // Returns the sent message's ID (used to tell the bot's own echoed messages
 // apart from genuine human-sent messages — see conversationState.js).
@@ -329,4 +347,4 @@ async function setTelegramWebhook(webhookUrl) {
   }
 }
 
-module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, setTelegramWebhook };
+module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, setTelegramWebhook, queueTelegramCall };

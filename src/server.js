@@ -48,7 +48,7 @@ async function sendInstagramReply(senderId, text) {
   const chunks = splitForInstagram(text);
   for (const chunk of chunks) {
     const sendResult = await sendInstagramMessage(senderId, chunk);
-    markBotMessageId(sendResult?.messageId);
+    await markBotMessageId(sendResult?.messageId);
   }
 }
 
@@ -193,10 +193,10 @@ async function handleMessagingEvent(event) {
   // it silently. If it's an echo the bot doesn't recognize, a human really
   // did send it manually, so pause the bot on this conversation.
   if (message.is_echo) {
-    if (wasSentByBot(message.mid)) {
+    if (await wasSentByBot(message.mid)) {
       return; // this is just our own reply bouncing back — not a human reply
     }
-    pauseAfterHumanReply(senderId);
+    await pauseAfterHumanReply(senderId);
     console.log(`Detected manual reply to ${senderId} — pausing bot for this conversation.`);
     return;
   }
@@ -248,7 +248,7 @@ async function flushMediaBatch(senderId) {
   if (batch.timer) clearTimeout(batch.timer);
   if (batch.items.length === 0) return;
 
-  if (isPaused(senderId)) {
+  if (await isPaused(senderId)) {
     console.log(`Conversation with ${senderId} is paused — dropping buffered media batch without replying.`);
     return;
   }
@@ -263,7 +263,7 @@ async function flushMediaBatch(senderId) {
   await sendTelegramMediaGroup(caption, batch.items);
 
   for (const item of batch.items) {
-    if (item.type === 'image') addPhotoUrl(senderId, item.url);
+    if (item.type === 'image') await addPhotoUrl(senderId, item.url);
   }
 
   const kindParts = [];
@@ -281,15 +281,15 @@ async function flushMediaBatch(senderId) {
 // by both a normal text message and a flushed media batch, so behavior is
 // identical either way.
 async function processTurn(senderId, effectiveText, precomputedDisplayName) {
-  addUserMessage(senderId, effectiveText);
+  await addUserMessage(senderId, effectiveText);
 
-  if (isPaused(senderId)) {
+  if (await isPaused(senderId)) {
     console.log(`Conversation with ${senderId} is paused — bot staying quiet.`);
     return;
   }
 
-  const reply = await getClaudeReply(getHistory(senderId));
-  addAssistantMessage(senderId, reply);
+  const reply = await getClaudeReply(await getHistory(senderId));
+  await addAssistantMessage(senderId, reply);
 
   // --- Human handoff: did Claude flag this as something it can't safely ---
   // answer (e.g. real-time animal availability)? If so, strip the silent
@@ -326,7 +326,7 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   };
 
   if (needsHandoff) {
-    setManualPause(senderId, true);
+    await setManualPause(senderId, true);
     console.log(`⚠️ Conversation with ${senderId} flagged for a volunteer — bot paused.`);
 
     const displayName = await getDisplayName();
@@ -359,7 +359,8 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     // to just the text summary above rather than losing the whole intake.
     try {
       const fields = parseIntakeFields(intakeSummary);
-      const photoUrls = getPhotoUrls(senderId).slice(-4); // most recent 4
+      const allPhotoUrls = await getPhotoUrls(senderId);
+      const photoUrls = allPhotoUrls.slice(-4); // most recent 4
       if (photoUrls.length > 0 && fields.name) {
         const imageBuffer = await generateStoryImage({
           photoUrls,
@@ -399,17 +400,17 @@ function checkAdminSecret(req, res, next) {
   next();
 }
 
-app.post('/admin/pause', checkAdminSecret, (req, res) => {
+app.post('/admin/pause', checkAdminSecret, async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId required' });
-  setManualPause(userId, true);
+  await setManualPause(userId, true);
   res.json({ ok: true, userId, paused: true });
 });
 
-app.post('/admin/resume', checkAdminSecret, (req, res) => {
+app.post('/admin/resume', checkAdminSecret, async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId required' });
-  setManualPause(userId, false);
+  await setManualPause(userId, false);
   res.json({ ok: true, userId, paused: false });
 });
 

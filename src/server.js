@@ -428,14 +428,13 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
       await sendTelegramSpacer();
     });
 
-    // The intake task is fully done — everything the team needs (text
-    // summary + story image) has been sent. Pause the bot on this
-    // conversation too, same as a handoff, so the team doesn't need to
-    // revisit it. Only genuine handoffs need someone to open Instagram and
-    // reply; this one just needs the image posted, tracked via the
-    // checkbox above.
-    await setManualPause(senderId, true);
-    console.log(`✅ Conversation with ${senderId} marked done after intake — bot paused, no follow-up needed unless they message again after 24h.`);
+    // The intake task itself is done — your team's Telegram record now has
+    // everything needed (text summary + story image + checkbox to track
+    // posting), so there's nothing further for the TEAM to do on this
+    // conversation unless they choose to. But the bot stays fully active
+    // and keeps replying normally if the person messages again (e.g. to
+    // say thanks, or ask something else) — it is not paused.
+    console.log(`✅ Adoption intake fully sent to Telegram for ${senderId} — bot remains active for this conversation.`);
   }
 }
 

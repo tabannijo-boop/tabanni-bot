@@ -12,7 +12,7 @@ const {
   addPhotoUrl,
   getPhotoUrls,
 } = require('./conversationState');
-const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage } = require('./apis');
+const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup } = require('./apis');
 const { generateStoryImage } = require('./storyTemplate');
 
 const app = express();
@@ -173,6 +173,14 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+// --- Media batching: when photos/videos arrive, wait up to this long for ---
+// more to come in before forwarding everything to Telegram together and
+// generating one reply, instead of reacting to every single photo
+// separately. Matches how people actually send a batch of photos: several
+// quick messages in a row, not one at a time with pauses.
+const MEDIA_BATCH_WINDOW_MS = 100 * 1000;
+const pendingMediaBatches = new Map(); // senderId -> { items: [{url,type}], texts: [string], timer }
+
 async function handleMessagingEvent(event) {
   const senderId = event.sender?.id;
   const message = event.message;
@@ -194,48 +202,85 @@ async function handleMessagingEvent(event) {
   }
 
   const userText = message.text;
+  const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
 
-  // --- Photo/video forwarding: if they sent media (adoption-story photos, ---
-  // injured-animal photos, lost/found photos, etc.), forward it straight to
-  // Telegram so the team has it ready to grab, regardless of whether there's
-  // also text in this message.
-  let attachmentCount = 0;
-  let attachmentKind = null; // 'photo' | 'video' | 'media' (mixed)
-  if (Array.isArray(message.attachments) && message.attachments.length > 0) {
-    const profile = await getInstagramUserProfile(senderId);
-    const displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
+  if (hasAttachments) {
+    // Buffer this media instead of processing immediately — see flushMediaBatch.
+    let batch = pendingMediaBatches.get(senderId);
+    if (!batch) {
+      batch = { items: [], texts: [], timer: null };
+      pendingMediaBatches.set(senderId, batch);
+      batch.timer = setTimeout(() => {
+        flushMediaBatch(senderId).catch((err) => console.error('Media batch flush error:', err));
+      }, MEDIA_BATCH_WINDOW_MS);
+    }
     for (const att of message.attachments) {
       const attUrl = att?.payload?.url;
       if (!attUrl) continue;
-      const caption = `📸 From ${displayName}${userText ? `\n"${userText}"` : ''}`;
-      if (att.type === 'image') {
-        await sendTelegramPhoto(caption, attUrl);
-        addPhotoUrl(senderId, attUrl);
-        attachmentCount++;
-        attachmentKind = attachmentKind === 'video' ? 'media' : 'photo';
-      } else if (att.type === 'video') {
-        await sendTelegramVideo(caption, attUrl);
-        attachmentCount++;
-        attachmentKind = attachmentKind === 'photo' ? 'media' : 'video';
+      if (att.type === 'image' || att.type === 'video') {
+        batch.items.push({ url: attUrl, type: att.type });
       }
     }
+    if (userText) batch.texts.push(userText);
+    console.log(`Buffered ${message.attachments.length} attachment(s) for ${senderId} — will flush in up to ${MEDIA_BATCH_WINDOW_MS / 1000}s.`);
+    return;
   }
 
-  // Build what actually goes into the conversation history / gets sent to
-  // Claude. If there's real text, use it as-is. If it's attachment-only
-  // (very common for adoption-story photos sent with no caption), describe
-  // what was sent so Claude can see it happened, acknowledge it, and keep
-  // the conversation moving (e.g. ask for whatever's still missing) instead
-  // of the bot going silent.
-  let effectiveText = userText;
-  if (attachmentCount > 0) {
-    const kindLabel = attachmentKind === 'video' ? 'video' : attachmentKind === 'media' ? 'photo(s)/video(s)' : 'photo(s)';
-    const attachmentNote = `[sent ${attachmentCount} ${kindLabel}]`;
-    effectiveText = userText ? `${userText} ${attachmentNote}` : attachmentNote;
+  // A real text message arrived. If there's a media batch waiting for this
+  // same person, flush it first (so photos get handled in the order they
+  // actually came in), then continue with this text message normally.
+  if (pendingMediaBatches.has(senderId)) {
+    await flushMediaBatch(senderId);
   }
 
-  if (!effectiveText) return; // truly nothing to respond to (e.g. a sticker with no attachments array)
+  if (!userText) return; // nothing to respond to (e.g. a sticker with no attachments array)
 
+  await processTurn(senderId, userText);
+}
+
+// Called once the 100-second window closes: forwards everything collected
+// as one grouped album, tracks photo URLs for story generation, then
+// processes it as a single turn (same as a normal text message).
+async function flushMediaBatch(senderId) {
+  const batch = pendingMediaBatches.get(senderId);
+  if (!batch) return;
+  pendingMediaBatches.delete(senderId);
+  if (batch.timer) clearTimeout(batch.timer);
+  if (batch.items.length === 0) return;
+
+  if (isPaused(senderId)) {
+    console.log(`Conversation with ${senderId} is paused — dropping buffered media batch without replying.`);
+    return;
+  }
+
+  const profile = await getInstagramUserProfile(senderId);
+  const displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
+
+  const photoCount = batch.items.filter((i) => i.type === 'image').length;
+  const videoCount = batch.items.filter((i) => i.type === 'video').length;
+
+  const caption = `📸 From ${displayName}${batch.texts.length ? `\n"${batch.texts.join(' ')}"` : ''}`;
+  await sendTelegramMediaGroup(caption, batch.items);
+
+  for (const item of batch.items) {
+    if (item.type === 'image') addPhotoUrl(senderId, item.url);
+  }
+
+  const kindParts = [];
+  if (photoCount) kindParts.push(`${photoCount} photo(s)`);
+  if (videoCount) kindParts.push(`${videoCount} video(s)`);
+  const attachmentNote = `[sent ${kindParts.join(' and ')}]`;
+  const effectiveText = batch.texts.length ? `${batch.texts.join(' ')} ${attachmentNote}` : attachmentNote;
+
+  await processTurn(senderId, effectiveText, displayName);
+}
+
+// Shared logic for handling one "turn": add the message to history, ask
+// Claude for a reply, act on any [[HANDOFF]] / [[FLAG]] / [[INTAKE]]
+// marker, send the reply, and fire the right Telegram notification. Used
+// by both a normal text message and a flushed media batch, so behavior is
+// identical either way.
+async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   addUserMessage(senderId, effectiveText);
 
   if (isPaused(senderId)) {
@@ -274,14 +319,17 @@ async function handleMessagingEvent(event) {
 
   await sendInstagramReply(senderId, outgoingText);
 
+  const getDisplayName = async () => {
+    if (precomputedDisplayName) return precomputedDisplayName;
+    const profile = await getInstagramUserProfile(senderId);
+    return profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
+  };
+
   if (needsHandoff) {
     setManualPause(senderId, true);
     console.log(`⚠️ Conversation with ${senderId} flagged for a volunteer — bot paused.`);
 
-    const profile = await getInstagramUserProfile(senderId);
-    const displayName = profile?.username
-      ? `@${profile.username}`
-      : (profile?.name || `IGSID ${senderId}`);
+    const displayName = await getDisplayName();
 
     await sendTelegramNotification(
       `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
@@ -290,10 +338,7 @@ async function handleMessagingEvent(event) {
   } else if (needsFlag) {
     console.log(`🚩 Conversation with ${senderId} flagged for awareness — bot is still replying normally.`);
 
-    const profile = await getInstagramUserProfile(senderId);
-    const displayName = profile?.username
-      ? `@${profile.username}`
-      : (profile?.name || `IGSID ${senderId}`);
+    const displayName = await getDisplayName();
 
     await sendTelegramNotification(
       `🚩 tabanni bot flagged a message for awareness (bot is still handling this conversation, no action needed unless you want to step in).\n\nFrom: ${displayName}\nMessage: "${effectiveText}"`
@@ -302,10 +347,7 @@ async function handleMessagingEvent(event) {
   } else if (intakeSummary) {
     console.log(`🆕 Adoption intake ready for ${senderId} — generating story image.`);
 
-    const profile = await getInstagramUserProfile(senderId);
-    const displayName = profile?.username
-      ? `@${profile.username}`
-      : (profile?.name || `IGSID ${senderId}`);
+    const displayName = await getDisplayName();
 
     await sendTelegramNotification(
       `🐾🆕 New adoption intake ready to post!\n\nFrom: ${displayName}\n\n${intakeSummary}`

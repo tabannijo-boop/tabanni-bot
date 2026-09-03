@@ -219,9 +219,6 @@ async function handleMessagingEvent(event) {
         attachmentKind = attachmentKind === 'photo' ? 'media' : 'video';
       }
     }
-    if (attachmentCount > 0) {
-      await sendTelegramSpacer();
-    }
   }
 
   // Build what actually goes into the conversation history / gets sent to

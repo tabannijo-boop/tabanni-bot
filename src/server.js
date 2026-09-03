@@ -10,7 +10,7 @@ const {
   markBotMessageId,
   wasSentByBot,
 } = require('./conversationState');
-const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo } = require('./apis');
+const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer } = require('./apis');
 
 const app = express();
 app.use(express.json());
@@ -88,17 +88,20 @@ app.post('/api/test-chat', async (req, res) => {
       await sendTelegramNotification(
         `🧪🐾🆕 [TEST PAGE] New adoption intake ready to post!\n\n${intakeParsed.summary}\n\nThis came from the /test.html team test page, not real Instagram.`
       );
+      await sendTelegramSpacer();
     } else if (reply.startsWith(HANDOFF_MARKER)) {
       handoff = true;
       outgoingText = reply.slice(HANDOFF_MARKER.length).trim();
       await sendTelegramNotification(
         `🧪 [TEST PAGE] tabanni bot flagged a conversation for a volunteer.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`
       );
+      await sendTelegramSpacer();
     } else if (reply.startsWith(FLAG_MARKER)) {
       outgoingText = reply.slice(FLAG_MARKER.length).trim();
       await sendTelegramNotification(
         `🧪🚩 [TEST PAGE] tabanni bot flagged a message for awareness (no pause).\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`
       );
+      await sendTelegramSpacer();
     }
     res.json({ reply: outgoingText, handoff, intake });
   } catch (err) {
@@ -190,6 +193,9 @@ async function handleMessagingEvent(event) {
         attachmentKind = attachmentKind === 'photo' ? 'media' : 'video';
       }
     }
+    if (attachmentCount > 0) {
+      await sendTelegramSpacer();
+    }
   }
 
   // Build what actually goes into the conversation history / gets sent to
@@ -257,6 +263,7 @@ async function handleMessagingEvent(event) {
     await sendTelegramNotification(
       `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
     );
+    await sendTelegramSpacer();
   } else if (needsFlag) {
     console.log(`🚩 Conversation with ${senderId} flagged for awareness — bot is still replying normally.`);
 
@@ -268,6 +275,7 @@ async function handleMessagingEvent(event) {
     await sendTelegramNotification(
       `🚩 tabanni bot flagged a message for awareness (bot is still handling this conversation, no action needed unless you want to step in).\n\nFrom: ${displayName}\nMessage: "${effectiveText}"`
     );
+    await sendTelegramSpacer();
   } else if (intakeSummary) {
     console.log(`🆕 Adoption intake ready for ${senderId} — sent to Telegram.`);
 
@@ -279,6 +287,7 @@ async function handleMessagingEvent(event) {
     await sendTelegramNotification(
       `🐾🆕 New adoption intake ready to post!\n\nFrom: ${displayName}\n\n${intakeSummary}\n\n(Any photos or videos they sent should already be forwarded above in this chat, or check earlier in this conversation.)`
     );
+    await sendTelegramSpacer();
   }
 }
 

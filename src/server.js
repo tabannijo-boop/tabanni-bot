@@ -12,7 +12,7 @@ const {
   addPhotoUrl,
   getPhotoUrls,
 } = require('./conversationState');
-const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery } = require('./apis');
+const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, queueTelegramCall } = require('./apis');
 const { generateStoryImage } = require('./storyTemplate');
 
 const app = express();
@@ -355,38 +355,44 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
 
     const displayName = await getDisplayName();
 
-    await sendTelegramNotification(
-      `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
-    );
-    await sendTelegramSpacer();
+    // The whole block (notification + spacer) runs as ONE atomic unit on
+    // the shared Telegram queue, so it can never get split up by another
+    // conversation's messages landing in between.
+    await queueTelegramCall(async () => {
+      await sendTelegramNotification(
+        `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
+      );
+      await sendTelegramSpacer();
+    });
   } else if (needsFlag) {
     console.log(`🚩 Conversation with ${senderId} flagged for awareness — bot is still replying normally.`);
 
     const displayName = await getDisplayName();
 
-    await sendTelegramNotification(
-      `🚩 tabanni bot flagged a message for awareness (bot is still handling this conversation, no action needed unless you want to step in).\n\nFrom: ${displayName}\nMessage: "${effectiveText}"`
-    );
-    await sendTelegramSpacer();
+    await queueTelegramCall(async () => {
+      await sendTelegramNotification(
+        `🚩 tabanni bot flagged a message for awareness (bot is still handling this conversation, no action needed unless you want to step in).\n\nFrom: ${displayName}\nMessage: "${effectiveText}"`
+      );
+      await sendTelegramSpacer();
+    });
   } else if (intakeSummary) {
     console.log(`🆕 Adoption intake ready for ${senderId} — generating story image.`);
 
     const displayName = await getDisplayName();
 
-    await sendTelegramNotification(
-      `🐾🆕 New adoption intake ready to post!\n\nFrom: ${displayName}\n\n${intakeSummary}`
-    );
-
-    // Try to generate the ready-to-post story image from the fields Claude
-    // extracted plus whatever photos this conversation collected. If this
-    // fails for any reason (bad photo URL, network hiccup, etc.), fall back
-    // to just the text summary above rather than losing the whole intake.
+    // Do the slow part (fetching photos, compositing the image) BEFORE
+    // touching the Telegram queue, so this conversation's image generation
+    // time doesn't hold up other conversations' Telegram messages. Only
+    // the actual sends get queued as one atomic block below.
+    let imageBuffer = null;
+    let fields = null;
+    let imageGenError = null;
     try {
-      const fields = parseIntakeFields(intakeSummary);
+      fields = parseIntakeFields(intakeSummary);
       const allPhotoUrls = await getPhotoUrls(senderId);
       const photoUrls = allPhotoUrls.slice(-4); // most recent 4
       if (photoUrls.length > 0 && fields.name) {
-        const imageBuffer = await generateStoryImage({
+        imageBuffer = await generateStoryImage({
           photoUrls,
           name: fields.name,
           animalType: fields.animalType,
@@ -396,20 +402,31 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
           story: fields.story,
           phone: fields.phone,
         });
-        await sendTelegramStoryImage(
-          `🖼️ Ready-to-post story card for ${fields.name} — save and add to Instagram Stories. Tap the checkbox below once it is posted.`,
-          imageBuffer,
-          `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
-        );
       } else {
         console.log(`Skipped story image for ${senderId}: missing photos or name.`);
       }
     } catch (err) {
       console.error('Story image generation failed:', err);
-      await sendTelegramNotification('⚠️ Could not auto-generate the story image for the intake above — please build it manually this time.');
+      imageGenError = err;
     }
 
-    await sendTelegramSpacer();
+    await queueTelegramCall(async () => {
+      await sendTelegramNotification(
+        `🐾🆕 New adoption intake ready to post!\n\nFrom: ${displayName}\n\n${intakeSummary}`
+      );
+
+      if (imageBuffer && fields) {
+        await sendTelegramStoryImage(
+          `🖼️ Ready-to-post story card for ${fields.name} — save and add to Instagram Stories. Tap the checkbox below once it is posted.`,
+          imageBuffer,
+          `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
+        );
+      } else if (imageGenError) {
+        await sendTelegramNotification('⚠️ Could not auto-generate the story image for the intake above — please build it manually this time.');
+      }
+
+      await sendTelegramSpacer();
+    });
 
     // The intake task is fully done — everything the team needs (text
     // summary + story image) has been sent. Pause the bot on this

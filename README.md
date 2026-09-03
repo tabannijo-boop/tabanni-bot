@@ -99,6 +99,73 @@ laptop won't work since it needs to always be on. Easiest free/cheap options:
 
 ---
 
+## Setting up Telegram notifications
+
+When the bot flags a conversation for a volunteer (someone asks for Sereen,
+asks for a human, or asks something the bot can't answer like a specific
+animal's availability), it pings a Telegram chat so someone actually notices.
+This takes about 5 minutes, no cost, no business verification needed.
+
+### Step 1 — Create the bot
+1. Open Telegram (app or web.telegram.org) and search for **@BotFather**
+2. Send it `/newbot`
+3. Give it a name (e.g. "tabanni Alerts") and a username ending in `bot`
+   (e.g. `tabanni_alerts_bot`)
+4. BotFather replies with a token that looks like `123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
+   — this is your `TELEGRAM_BOT_TOKEN`
+
+### Step 2 — Decide who gets notified
+**Option A — a group chat (recommended for a team):**
+1. Create a new Telegram group with whoever should see the alerts
+2. Add your new bot to the group (search its username, add as member)
+3. Send any message in the group, then visit this URL in your browser
+   (replace `<TOKEN>` with your real token):
+   `https://api.telegram.org/bot<TOKEN>/getUpdates`
+4. Look for `"chat":{"id":-100123456789,...}` in the response — that negative
+   number (including the minus sign) is your `TELEGRAM_CHAT_ID`
+
+**Option B — just you, one-on-one:**
+1. Search for your bot's username in Telegram and send it any message (e.g. "hi")
+2. Visit the same `getUpdates` URL as above
+3. Your `chat.id` will be a positive number this time — that's your `TELEGRAM_CHAT_ID`
+
+### Step 3 — Add both values to your environment
+Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in Render's Environment
+settings (same place as your other variables), then redeploy.
+
+### Step 4 — Test it
+Open `/test.html` and type something like "can I speak to Sereen" — you
+should get a Telegram message within a couple seconds. If nothing arrives,
+check Render's logs for a line starting with "Telegram notification failed"
+or "(Telegram not configured...)" to see what went wrong.
+
+---
+
+## Ready-to-post story images
+
+Once an adoption intake is complete (all fields collected, including photos
+and a video — see `knowledge.js`), the bot automatically generates a
+finished, branded story image (1080x1920 PNG) from up to 4 of the photos
+plus the pet's name, age, gender, vaccination status, a short story caption,
+and phone number — and sends it to your Telegram group as a file, ready to
+save and post directly to Instagram Stories.
+
+- The layout code lives in `src/storyTemplate.js`. Colors, fonts, and
+  positioning are all editable there if you want to adjust the look.
+- Real font files are bundled in `/fonts` (Latin + Arabic) so text renders
+  consistently regardless of the server's system fonts. Don't delete that
+  folder.
+- This uses the `sharp` image library, which is already in `package.json` —
+  no extra setup needed, it installs automatically on deploy.
+- If image generation fails for any reason (bad photo URL, network hiccup),
+  the bot falls back to just sending the text summary, so an intake is never
+  silently lost — check the logs for a "Story image generation failed"
+  entry if this happens.
+- The video (if one was sent) is NOT merged into the image — Instagram
+  Stories are one image or one video, not both combined. Post the generated
+  image first, then the raw video (already forwarded separately) as a
+  second story slide right after.
+
 ## Editing the bot's brain
 
 Everything about tone and knowledge lives in `src/knowledge.js` — edit the

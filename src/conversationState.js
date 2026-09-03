@@ -48,9 +48,26 @@ const HANDOFF_PAUSE_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 function getOrCreate(userId) {
   if (!conversations.has(userId)) {
-    conversations.set(userId, { pausedUntil: null, manualPauseAt: null, history: [] });
+    conversations.set(userId, { pausedUntil: null, manualPauseAt: null, history: [], photoUrls: [] });
   }
   return conversations.get(userId);
+}
+
+// Tracks photo URLs sent during a conversation, so that once an adoption
+// intake is complete, the story-image generator has real photos to use
+// without needing to re-parse the whole message history.
+const MAX_TRACKED_PHOTOS = 10;
+function addPhotoUrl(userId, url) {
+  if (!url) return;
+  const convo = getOrCreate(userId);
+  convo.photoUrls.push(url);
+  if (convo.photoUrls.length > MAX_TRACKED_PHOTOS) {
+    convo.photoUrls = convo.photoUrls.slice(-MAX_TRACKED_PHOTOS);
+  }
+}
+
+function getPhotoUrls(userId) {
+  return getOrCreate(userId).photoUrls;
 }
 
 function isPaused(userId) {
@@ -114,4 +131,6 @@ module.exports = {
   getHistory,
   markBotMessageId,
   wasSentByBot,
+  addPhotoUrl,
+  getPhotoUrls,
 };

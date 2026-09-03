@@ -171,4 +171,33 @@ async function sendTelegramSpacer() {
   await sendTelegramNotification('⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯');
 }
 
-module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer };
+// Sends the finished, generated story image to Telegram as a document (not
+// a compressed photo) so your team gets the full-quality PNG, ready to save
+// and post directly to Instagram Stories.
+async function sendTelegramStoryImage(caption, imageBuffer, filename = 'tabanni_story.png') {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.log('(Telegram not configured — skipping story image send.)');
+    return false;
+  }
+  const url = `https://api.telegram.org/bot${token}/sendDocument`;
+  try {
+    const form = new FormData();
+    form.append('chat_id', chatId);
+    form.append('caption', caption);
+    form.append('document', new Blob([imageBuffer], { type: 'image/png' }), filename);
+
+    const res = await fetch(url, { method: 'POST', body: form });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Telegram story image send failed:', res.status, errBody);
+    }
+    return res.ok;
+  } catch (err) {
+    console.error('Telegram story image send error:', err);
+    return false;
+  }
+}
+
+module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage };

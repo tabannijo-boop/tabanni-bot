@@ -9,8 +9,11 @@ const {
   getHistory,
   markBotMessageId,
   wasSentByBot,
+  addPhotoUrl,
+  getPhotoUrls,
 } = require('./conversationState');
-const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer } = require('./apis');
+const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage } = require('./apis');
+const { generateStoryImage } = require('./storyTemplate');
 
 const app = express();
 app.use(express.json());
@@ -62,6 +65,28 @@ function parseIntakeMarker(reply) {
   const summary = reply.slice(INTAKE_MARKER_START.length, endIdx).trim();
   const outgoingText = reply.slice(endIdx + INTAKE_MARKER_END.length).trim();
   return { summary, outgoingText };
+}
+
+// Pulls the labeled fields (Name, Type, Age, Gender, Vaccination status,
+// Phone number, Story) out of the [[INTAKE]] summary block, so they can be
+// passed to the story image generator as structured data instead of raw
+// text. Matches the format defined in knowledge.js — if that format ever
+// changes, update the labels here to match.
+function parseIntakeFields(summary) {
+  const getField = (label) => {
+    const re = new RegExp(`${label}\\s*:\\s*(.+)`, 'i');
+    const match = summary.match(re);
+    return match ? match[1].trim() : '';
+  };
+  return {
+    name: getField('Name') || getField('🐾 Name'),
+    animalType: getField('Type'),
+    age: getField('Age'),
+    gender: getField('Gender'),
+    vaccination: getField('Vaccination status'),
+    phone: getField('Phone number'),
+    story: getField('Story'),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +210,7 @@ async function handleMessagingEvent(event) {
       const caption = `📸 From ${displayName}${userText ? `\n"${userText}"` : ''}`;
       if (att.type === 'image') {
         await sendTelegramPhoto(caption, attUrl);
+        addPhotoUrl(senderId, attUrl);
         attachmentCount++;
         attachmentKind = attachmentKind === 'video' ? 'media' : 'photo';
       } else if (att.type === 'video') {
@@ -277,7 +303,7 @@ async function handleMessagingEvent(event) {
     );
     await sendTelegramSpacer();
   } else if (intakeSummary) {
-    console.log(`🆕 Adoption intake ready for ${senderId} — sent to Telegram.`);
+    console.log(`🆕 Adoption intake ready for ${senderId} — generating story image.`);
 
     const profile = await getInstagramUserProfile(senderId);
     const displayName = profile?.username
@@ -285,8 +311,40 @@ async function handleMessagingEvent(event) {
       : (profile?.name || `IGSID ${senderId}`);
 
     await sendTelegramNotification(
-      `🐾🆕 New adoption intake ready to post!\n\nFrom: ${displayName}\n\n${intakeSummary}\n\n(Any photos or videos they sent should already be forwarded above in this chat, or check earlier in this conversation.)`
+      `🐾🆕 New adoption intake ready to post!\n\nFrom: ${displayName}\n\n${intakeSummary}`
     );
+
+    // Try to generate the ready-to-post story image from the fields Claude
+    // extracted plus whatever photos this conversation collected. If this
+    // fails for any reason (bad photo URL, network hiccup, etc.), fall back
+    // to just the text summary above rather than losing the whole intake.
+    try {
+      const fields = parseIntakeFields(intakeSummary);
+      const photoUrls = getPhotoUrls(senderId).slice(-4); // most recent 4
+      if (photoUrls.length > 0 && fields.name) {
+        const imageBuffer = await generateStoryImage({
+          photoUrls,
+          name: fields.name,
+          animalType: fields.animalType,
+          age: fields.age,
+          gender: fields.gender,
+          vaccination: fields.vaccination,
+          story: fields.story,
+          phone: fields.phone,
+        });
+        await sendTelegramStoryImage(
+          `🖼️ Ready-to-post story card for ${fields.name} — save and add to Instagram Stories.`,
+          imageBuffer,
+          `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
+        );
+      } else {
+        console.log(`Skipped story image for ${senderId}: missing photos or name.`);
+      }
+    } catch (err) {
+      console.error('Story image generation failed:', err);
+      await sendTelegramNotification('⚠️ Could not auto-generate the story image for the intake above — please build it manually this time.');
+    }
+
     await sendTelegramSpacer();
   }
 }

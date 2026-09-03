@@ -171,6 +171,8 @@ async function handleMessagingEvent(event) {
   // injured-animal photos, lost/found photos, etc.), forward it straight to
   // Telegram so the team has it ready to grab, regardless of whether there's
   // also text in this message.
+  let attachmentCount = 0;
+  let attachmentKind = null; // 'photo' | 'video' | 'media' (mixed)
   if (Array.isArray(message.attachments) && message.attachments.length > 0) {
     const profile = await getInstagramUserProfile(senderId);
     const displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
@@ -180,15 +182,32 @@ async function handleMessagingEvent(event) {
       const caption = `📸 From ${displayName}${userText ? `\n"${userText}"` : ''}`;
       if (att.type === 'image') {
         await sendTelegramPhoto(caption, attUrl);
+        attachmentCount++;
+        attachmentKind = attachmentKind === 'video' ? 'media' : 'photo';
       } else if (att.type === 'video') {
         await sendTelegramVideo(caption, attUrl);
+        attachmentCount++;
+        attachmentKind = attachmentKind === 'photo' ? 'media' : 'video';
       }
     }
   }
 
-  if (!userText) return; // ignore attachment-only messages for the text/reply logic below
+  // Build what actually goes into the conversation history / gets sent to
+  // Claude. If there's real text, use it as-is. If it's attachment-only
+  // (very common for adoption-story photos sent with no caption), describe
+  // what was sent so Claude can see it happened, acknowledge it, and keep
+  // the conversation moving (e.g. ask for whatever's still missing) instead
+  // of the bot going silent.
+  let effectiveText = userText;
+  if (attachmentCount > 0) {
+    const kindLabel = attachmentKind === 'video' ? 'video' : attachmentKind === 'media' ? 'photo(s)/video(s)' : 'photo(s)';
+    const attachmentNote = `[sent ${attachmentCount} ${kindLabel}]`;
+    effectiveText = userText ? `${userText} ${attachmentNote}` : attachmentNote;
+  }
 
-  addUserMessage(senderId, userText);
+  if (!effectiveText) return; // truly nothing to respond to (e.g. a sticker with no attachments array)
+
+  addUserMessage(senderId, effectiveText);
 
   if (isPaused(senderId)) {
     console.log(`Conversation with ${senderId} is paused — bot staying quiet.`);
@@ -236,7 +255,7 @@ async function handleMessagingEvent(event) {
       : (profile?.name || `IGSID ${senderId}`);
 
     await sendTelegramNotification(
-      `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${userText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
+      `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
     );
   } else if (needsFlag) {
     console.log(`🚩 Conversation with ${senderId} flagged for awareness — bot is still replying normally.`);
@@ -247,7 +266,7 @@ async function handleMessagingEvent(event) {
       : (profile?.name || `IGSID ${senderId}`);
 
     await sendTelegramNotification(
-      `🚩 tabanni bot flagged a message for awareness (bot is still handling this conversation, no action needed unless you want to step in).\n\nFrom: ${displayName}\nMessage: "${userText}"`
+      `🚩 tabanni bot flagged a message for awareness (bot is still handling this conversation, no action needed unless you want to step in).\n\nFrom: ${displayName}\nMessage: "${effectiveText}"`
     );
   } else if (intakeSummary) {
     console.log(`🆕 Adoption intake ready for ${senderId} — sent to Telegram.`);

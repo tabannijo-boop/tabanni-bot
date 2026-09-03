@@ -39,20 +39,40 @@ async function sendInstagramMessage(recipientId, text) {
 async function getClaudeReply(history) {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
+
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': process.env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
     },
+
     body: JSON.stringify({
-      // Updated from Sonnet 4.6 to Sonnet 5
+      // Claude Sonnet 5
       model: 'claude-sonnet-5',
 
-      // Keep the existing safety limit on reply length
+      // Maximum response length
       max_tokens: 500,
 
-      // tabanni knowledge and behavior instructions
-      system: SYSTEM_PROMPT,
+      // Sonnet 5 has thinking enabled by default.
+      // For short Instagram customer-service replies,
+      // we do not need extended thinking.
+      thinking: {
+        type: 'disabled',
+      },
+
+      // Cache the large tabanni knowledge base for 1 hour.
+      // This avoids repeatedly paying the full input price
+      // for the same system instructions.
+      system: [
+        {
+          type: 'text',
+          text: SYSTEM_PROMPT,
+          cache_control: {
+            type: 'ephemeral',
+            ttl: '1h',
+          },
+        },
+      ],
 
       // Conversation history from Redis
       messages: history,
@@ -63,17 +83,23 @@ async function getClaudeReply(history) {
     const errBody = await res.text();
     console.error('Claude API failed:', res.status, errBody);
 
-    return "Hello! Thank you for reaching out. A team member will follow up with you shortly.";
+    return "Hello! Thank you for reaching out — a team member will follow up with you shortly. 🐾";
   }
 
   const data = await res.json();
+
+  // Log Claude usage so we can see whether prompt caching
+  // is actually working.
+  if (data.usage) {
+    console.log('Claude usage:', JSON.stringify(data.usage));
+  }
 
   const textBlocks = (data.content || [])
     .filter((b) => b.type === 'text')
     .map((b) => b.text);
 
   return textBlocks.join('\n').trim() ||
-    "Hello! Thank you for reaching out. A team member will follow up with you shortly.";
+    "Hello! Thank you for reaching out — a team member will follow up with you shortly. 🐾";
 }
 
 // Pings your team on Telegram when a conversation gets flagged for a human.
@@ -292,7 +318,6 @@ async function sendTelegramMediaGroup(caption, items) {
 
   if (!items || items.length === 0) return false;
 
-  // Single item
   if (items.length === 1) {
     const item = items[0];
 
@@ -301,7 +326,6 @@ async function sendTelegramMediaGroup(caption, items) {
       : sendTelegramPhoto(caption, item.url);
   }
 
-  // Telegram allows up to 10 items per media group.
   const chunks = [];
 
   for (let i = 0; i < items.length; i += 10) {

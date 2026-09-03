@@ -173,13 +173,17 @@ async function sendTelegramSpacer() {
 
 // Sends the finished, generated story image to Telegram as a document (not
 // a compressed photo) so your team gets the full-quality PNG, ready to save
-// and post directly to Instagram Stories.
+// and post directly to Instagram Stories. Includes a tappable checkbox
+// button so the team can mark it "posted" once it's actually on the story —
+// tapping it edits this same message, no separate tracking needed.
+// Returns { chatId, messageId } on success (needed to edit it later), or
+// null on failure.
 async function sendTelegramStoryImage(caption, imageBuffer, filename = 'tabanni_story.png') {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) {
     console.log('(Telegram not configured — skipping story image send.)');
-    return false;
+    return null;
   }
   const url = `https://api.telegram.org/bot${token}/sendDocument`;
   try {
@@ -187,16 +191,21 @@ async function sendTelegramStoryImage(caption, imageBuffer, filename = 'tabanni_
     form.append('chat_id', chatId);
     form.append('caption', caption);
     form.append('document', new Blob([imageBuffer], { type: 'image/png' }), filename);
+    form.append('reply_markup', JSON.stringify({
+      inline_keyboard: [[{ text: '☐ Not posted yet', callback_data: 'toggle_posted' }]],
+    }));
 
     const res = await fetch(url, { method: 'POST', body: form });
     if (!res.ok) {
       const errBody = await res.text();
       console.error('Telegram story image send failed:', res.status, errBody);
+      return null;
     }
-    return res.ok;
+    const data = await res.json();
+    return { chatId: data.result?.chat?.id, messageId: data.result?.message_id };
   } catch (err) {
     console.error('Telegram story image send error:', err);
-    return false;
+    return null;
   }
 }
 
@@ -256,4 +265,68 @@ async function sendTelegramMediaGroup(caption, items) {
   return allOk;
 }
 
-module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup };
+// Called when someone taps the "posted / not posted" checkbox button on a
+// story image message — edits that exact message's button to reflect the
+// new state.
+async function editTelegramMessageReplyMarkup(chatId, messageId, replyMarkup) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return false;
+  const url = `https://api.telegram.org/bot${token}/editMessageReplyMarkup`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: replyMarkup }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Edit reply markup failed:', res.status, errBody);
+    }
+    return res.ok;
+  } catch (err) {
+    console.error('Edit reply markup error:', err);
+    return false;
+  }
+}
+
+// Required by Telegram whenever a button is tapped — clears the little
+// loading spinner on the button, optionally shows a brief toast.
+async function answerTelegramCallbackQuery(callbackQueryId, text = '') {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return false;
+  const url = `https://api.telegram.org/bot${token}/answerCallbackQuery`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+    });
+    return res.ok;
+  } catch (err) {
+    console.error('Answer callback query error:', err);
+    return false;
+  }
+}
+
+// One-time setup call — tells Telegram where to send button-tap events.
+// See README for how/when to run this.
+async function setTelegramWebhook(webhookUrl) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return false;
+  const url = `https://api.telegram.org/bot${token}/setWebhook`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: webhookUrl }),
+    });
+    const data = await res.json();
+    console.log('Telegram setWebhook result:', JSON.stringify(data));
+    return res.ok;
+  } catch (err) {
+    console.error('setWebhook error:', err);
+    return false;
+  }
+}
+
+module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, setTelegramWebhook };

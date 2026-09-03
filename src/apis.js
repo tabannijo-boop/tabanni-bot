@@ -200,4 +200,60 @@ async function sendTelegramStoryImage(caption, imageBuffer, filename = 'tabanni_
   }
 }
 
-module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage };
+// Sends multiple photos/videos to Telegram as one grouped album (instead of
+// separate messages), so a batch of adoption-story media arrives together
+// with one caption instead of flooding the chat. Telegram requires at least
+// 2 items per group and caps each group at 10, so this chunks larger
+// batches and falls back to a single photo/video send for a lone item.
+async function sendTelegramMediaGroup(caption, items) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.log('(Telegram not configured — skipping media group send.)');
+    return false;
+  }
+  if (!items || items.length === 0) return false;
+
+  if (items.length === 1) {
+    const item = items[0];
+    return item.type === 'video' ? sendTelegramVideo(caption, item.url) : sendTelegramPhoto(caption, item.url);
+  }
+
+  const chunks = [];
+  for (let i = 0; i < items.length; i += 10) chunks.push(items.slice(i, i + 10));
+
+  let allOk = true;
+  for (let c = 0; c < chunks.length; c++) {
+    const chunkItems = chunks[c];
+    if (chunkItems.length === 1) {
+      const item = chunkItems[0];
+      const ok = item.type === 'video' ? await sendTelegramVideo(c === 0 ? caption : '', item.url) : await sendTelegramPhoto(c === 0 ? caption : '', item.url);
+      allOk = allOk && ok;
+      continue;
+    }
+    const media = chunkItems.map((item, i) => ({
+      type: item.type === 'video' ? 'video' : 'photo',
+      media: item.url,
+      ...(c === 0 && i === 0 ? { caption } : {}),
+    }));
+    const url = `https://api.telegram.org/bot${token}/sendMediaGroup`;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, media }),
+      });
+      if (!res.ok) {
+        const errBody = await res.text();
+        console.error('Telegram media group send failed:', res.status, errBody);
+      }
+      allOk = allOk && res.ok;
+    } catch (err) {
+      console.error('Telegram media group error:', err);
+      allOk = false;
+    }
+  }
+  return allOk;
+}
+
+module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup };

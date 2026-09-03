@@ -12,7 +12,7 @@ const {
   addPhotoUrl,
   getPhotoUrls,
 } = require('./conversationState');
-const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup } = require('./apis');
+const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery } = require('./apis');
 const { generateStoryImage } = require('./storyTemplate');
 
 const app = express();
@@ -132,6 +132,30 @@ app.post('/api/test-chat', async (req, res) => {
   } catch (err) {
     console.error('Test chat error:', err);
     res.status(500).json({ reply: "Something went wrong — check server logs.", handoff: false });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Telegram webhook — receives button-tap events (the "posted / not posted"
+// checkbox on story images). Separate from the Instagram webhook above.
+// One-time setup required — see README.
+// ---------------------------------------------------------------------------
+app.post('/telegram-webhook', async (req, res) => {
+  res.sendStatus(200);
+
+  const callbackQuery = req.body?.callback_query;
+  if (!callbackQuery) return;
+
+  if (callbackQuery.data === 'toggle_posted') {
+    const currentText = callbackQuery.message?.reply_markup?.inline_keyboard?.[0]?.[0]?.text || '';
+    const isCurrentlyPosted = currentText.includes('✅');
+    const newText = isCurrentlyPosted ? '☐ Not posted yet' : '✅ Posted to Instagram';
+    const newMarkup = { inline_keyboard: [[{ text: newText, callback_data: 'toggle_posted' }]] };
+
+    await editTelegramMessageReplyMarkup(callbackQuery.message.chat.id, callbackQuery.message.message_id, newMarkup);
+    await answerTelegramCallbackQuery(callbackQuery.id, isCurrentlyPosted ? 'Marked as not posted' : 'Marked as posted!');
+  } else {
+    await answerTelegramCallbackQuery(callbackQuery.id);
   }
 });
 
@@ -373,7 +397,7 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
           phone: fields.phone,
         });
         await sendTelegramStoryImage(
-          `🖼️ Ready-to-post story card for ${fields.name} — save and add to Instagram Stories.`,
+          `🖼️ Ready-to-post story card for ${fields.name} — save and add to Instagram Stories. Tap the checkbox below once it is posted.`,
           imageBuffer,
           `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
         );
@@ -386,6 +410,15 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     }
 
     await sendTelegramSpacer();
+
+    // The intake task is fully done — everything the team needs (text
+    // summary + story image) has been sent. Pause the bot on this
+    // conversation too, same as a handoff, so the team doesn't need to
+    // revisit it. Only genuine handoffs need someone to open Instagram and
+    // reply; this one just needs the image posted, tracked via the
+    // checkbox above.
+    await setManualPause(senderId, true);
+    console.log(`✅ Conversation with ${senderId} marked done after intake — bot paused, no follow-up needed unless they message again after 24h.`);
   }
 }
 

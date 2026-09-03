@@ -13,7 +13,7 @@ const path = require('path');
 
 const CANVAS_W = 1080;
 const CANVAS_H = 1920;
-const PANEL_H = 620; // height of the bottom info panel
+const PANEL_H = 720; // height of the bottom info panel
 
 const BRAND_ORANGE = '#FF8C00';
 const BRAND_DARK = '#2B2320';
@@ -148,23 +148,23 @@ async function generateStoryImage(info) {
   const anchorAttr = isAr ? 'end' : 'start';
 
   const tags = [info.age, info.gender, info.vaccination].filter(Boolean);
-  const storyLines = wrapText(info.story, isAr ? 34 : 46, 2);
+  const storyLines = wrapText(info.story, isAr ? 30 : 40, 2);
 
   let tagX = textAnchorStart;
   const tagEls = [];
-  const tagY = 210;
+  const tagY = 250;
   for (const tag of tags) {
-    const tagW = escapeXml(tag).length * 11 + 32;
+    const tagW = escapeXml(tag).length * 15 + 40;
     const rectX = isAr ? tagX - tagW : tagX;
     tagEls.push(`
-      <rect x="${rectX}" y="${tagY}" width="${tagW}" height="40" rx="20" fill="rgba(255,255,255,0.12)" />
-      <text x="${isAr ? rectX + tagW / 2 : rectX + tagW / 2}" y="${tagY + 26}" font-family="${fontFamily}" font-size="20" fill="${BRAND_CREAM}" text-anchor="middle">${escapeXml(tag)}</text>
+      <rect x="${rectX}" y="${tagY}" width="${tagW}" height="54" rx="27" fill="rgba(255,255,255,0.12)" />
+      <text x="${rectX + tagW / 2}" y="${tagY + 36}" font-family="${fontFamily}" font-size="27" fill="${BRAND_CREAM}" text-anchor="middle">${escapeXml(tag)}</text>
     `);
-    tagX = isAr ? rectX - 12 : rectX + tagW + 12;
+    tagX = isAr ? rectX - 14 : rectX + tagW + 14;
   }
 
   const storyTspans = storyLines
-    .map((line, i) => `<tspan x="${textAnchorStart}" dy="${i === 0 ? 0 : 34}">${escapeXml(line)}</tspan>`)
+    .map((line, i) => `<tspan x="${textAnchorStart}" dy="${i === 0 ? 0 : 46}">${escapeXml(line)}</tspan>`)
     .join('');
 
   const panelSvg = `
@@ -179,24 +179,23 @@ async function generateStoryImage(info) {
       </defs>
       <rect width="${CANVAS_W}" height="${PANEL_H}" fill="${BRAND_DARK}" />
 
-      <rect x="64" y="40" width="${escapeXml(info.animalType === 'cat' ? 'up for adoption' : 'up for adoption').length * 11 + 40}" height="48" rx="24" fill="${BRAND_ORANGE}" />
-      <text x="84" y="72" font-family="${fontFamily}" font-size="22" font-weight="500" fill="${BRAND_CREAM}">up for adoption</text>
+      <rect x="64" y="44" width="${escapeXml('up for adoption').length * 15 + 50}" height="60" rx="30" fill="${BRAND_ORANGE}" />
+      <text x="89" y="84" font-family="${fontFamily}" font-size="30" font-weight="500" fill="${BRAND_CREAM}">up for adoption</text>
 
-      <text x="${textAnchorStart}" y="150" font-family="${fontFamily}" font-size="52" font-weight="500" fill="${BRAND_CREAM}" text-anchor="${anchorAttr}">${escapeXml(info.name)}</text>
+      <text x="${textAnchorStart}" y="200" font-family="${fontFamily}" font-size="68" font-weight="500" fill="${BRAND_CREAM}" text-anchor="${anchorAttr}">${escapeXml(info.name)}</text>
 
       ${tagEls.join('')}
 
-      <text x="${textAnchorStart}" y="290" font-family="${fontFamily}" font-size="28" fill="#D8D0C0" text-anchor="${anchorAttr}" font-style="italic">${storyTspans}</text>
+      <text x="${textAnchorStart}" y="370" font-family="${fontFamily}" font-size="36" fill="#D8D0C0" text-anchor="${anchorAttr}" font-style="italic">${storyTspans}</text>
 
-      <line x1="64" y1="${PANEL_H - 130}" x2="${CANVAS_W - 64}" y2="${PANEL_H - 130}" stroke="rgba(255,255,255,0.2)" stroke-width="2" />
+      <line x1="64" y1="${PANEL_H - 150}" x2="${CANVAS_W - 64}" y2="${PANEL_H - 150}" stroke="rgba(255,255,255,0.2)" stroke-width="2" />
 
-      <circle cx="90" cy="${PANEL_H - 76}" r="22" fill="${BRAND_ORANGE}" />
-      <text x="90" y="${PANEL_H - 68}" font-family="${fontFamily}" font-size="22" fill="${BRAND_CREAM}" text-anchor="middle">☎</text>
-      <text x="128" y="${PANEL_H - 68}" font-family="${fontFamily}" font-size="30" fill="${BRAND_CREAM}">${escapeXml(info.phone)}</text>
+      <circle cx="102" cy="${PANEL_H - 84}" r="32" fill="${BRAND_ORANGE}" />
+      <text x="102" y="${PANEL_H - 73}" font-family="${fontFamily}" font-size="30" fill="${BRAND_CREAM}" text-anchor="middle">☎</text>
+      <text x="150" y="${PANEL_H - 68}" font-family="${fontFamily}" font-size="46" fill="${BRAND_CREAM}">${escapeXml(info.phone)}</text>
 
-      <circle cx="${CANVAS_W - 90}" cy="${PANEL_H - 76}" r="20" fill="${BRAND_CREAM}" />
-      <text x="${CANVAS_W - 90}" y="${PANEL_H - 68}" font-family="${fontFamily}" font-size="20" text-anchor="middle">🐾</text>
-      <text x="${CANVAS_W - 120}" y="${PANEL_H - 68}" font-family="${fontFamily}" font-size="24" fill="${BRAND_CREAM}" text-anchor="end">tabanni</text>
+      <circle cx="${CANVAS_W - 84}" cy="${PANEL_H - 84}" r="36" fill="${BRAND_CREAM}" />
+      <text x="${CANVAS_W - 84}" y="${PANEL_H - 72}" font-family="${fontFamily}" font-size="34" text-anchor="middle">🐾</text>
     </svg>
   `;
 

@@ -164,4 +164,11 @@ async function sendTelegramVideo(caption, videoUrl) {
   }
 }
 
-module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo };
+// Sends a short visual divider message to Telegram, so consecutive alerts
+// (handoffs, flags, intakes) are easy to tell apart at a glance in a busy
+// group chat instead of blurring together.
+async function sendTelegramSpacer() {
+  await sendTelegramNotification('⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯');
+}
+
+module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer };

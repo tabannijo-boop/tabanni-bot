@@ -1,6 +1,8 @@
 const { SYSTEM_PROMPT } = require('./knowledge');
 
 // Sends a text reply to a user on Instagram via the Graph API.
+// Returns the sent message's ID (used to tell the bot's own echoed messages
+// apart from genuine human-sent messages — see conversationState.js).
 async function sendInstagramMessage(recipientId, text) {
   const url = `https://graph.instagram.com/v21.0/${process.env.IG_ACCOUNT_ID}/messages`;
 
@@ -19,8 +21,10 @@ async function sendInstagramMessage(recipientId, text) {
   if (!res.ok) {
     const errBody = await res.text();
     console.error('Instagram send failed:', res.status, errBody);
+    return { ok: false, messageId: null };
   }
-  return res.ok;
+  const data = await res.json();
+  return { ok: true, messageId: data.message_id || null };
 }
 
 // Asks Claude for a reply, given the conversation history so far.
@@ -104,4 +108,60 @@ async function getInstagramUserProfile(psid) {
   }
 }
 
-module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile };
+// Forwards a photo the person sent on Instagram straight to your Telegram
+// group, so your team has adoption-story photos, injured-animal photos,
+// lost/found photos, etc. all in one place — ready to grab and edit/post,
+// without digging through Instagram DMs. Does not edit or post anything
+// itself; that's still a human's call.
+async function sendTelegramPhoto(caption, photoUrl) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.log('(Telegram not configured — skipping photo forward.)');
+    return false;
+  }
+  const url = `https://api.telegram.org/bot${token}/sendPhoto`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, photo: photoUrl, caption }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Telegram photo forward failed:', res.status, errBody);
+    }
+    return res.ok;
+  } catch (err) {
+    console.error('Telegram photo forward error:', err);
+    return false;
+  }
+}
+
+// Same idea, for videos.
+async function sendTelegramVideo(caption, videoUrl) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.log('(Telegram not configured — skipping video forward.)');
+    return false;
+  }
+  const url = `https://api.telegram.org/bot${token}/sendVideo`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, video: videoUrl, caption }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Telegram video forward failed:', res.status, errBody);
+    }
+    return res.ok;
+  } catch (err) {
+    console.error('Telegram video forward error:', err);
+    return false;
+  }
+}
+
+module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo };

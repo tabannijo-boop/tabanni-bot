@@ -53,6 +53,9 @@ async function getClaudeReply(history) {
       'Content-Type': 'application/json',
       'x-api-key': process.env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
+      // Required to use the 1-hour cache TTL (instead of the 5-minute
+      // default) — see the ttl: '1h' below.
+      'anthropic-beta': 'extended-cache-ttl-2025-04-11',
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-6',
@@ -61,15 +64,20 @@ async function getClaudeReply(history) {
       // every single call and is by far the largest part of each request.
       // Marking it with cache_control lets Anthropic reuse it from cache
       // instead of reprocessing it from scratch every time — cached reads
-      // cost 90% less than fresh input. This matters most within an active
-      // back-and-forth conversation (the cache lives for a few minutes);
-      // the very first message of a new conversation still pays full price
-      // once, since there's nothing to reuse yet.
+      // cost 90% less than fresh input.
+      //
+      // Using the 1-hour TTL (not the 5-minute default) on purpose: real
+      // conversations here often take longer than 5 minutes between
+      // messages (someone answering the surrender checklist, finding
+      // photos, etc.), so the default 5-minute cache was expiring between
+      // messages and paying full price repeatedly. The 1-hour write costs
+      // a bit more up front (2x base price vs 1.25x for 5-min) but pays
+      // for itself easily across a realistic multi-message conversation.
       system: [
         {
           type: 'text',
           text: SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral' },
+          cache_control: { type: 'ephemeral', ttl: '1h' },
         },
       ],
       messages: history,

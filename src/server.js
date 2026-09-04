@@ -11,6 +11,7 @@ const {
   wasSentByBot,
   addPhotoUrl,
   getPhotoUrls,
+  claimIncomingMessage,
 } = require('./conversationState');
 const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, queueTelegramCall } = require('./apis');
 const { generateStoryImage } = require('./storyTemplate');
@@ -124,7 +125,7 @@ app.post('/api/test-chat', async (req, res) => {
     } else if (reply.startsWith(FLAG_MARKER)) {
       outgoingText = reply.slice(FLAG_MARKER.length).trim();
       await sendTelegramNotification(
-        `🧪🚩 [TEST PAGE] tabanni bot flagged a message for awareness (no pause).\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`
+        `🧪🚩 [TEST PAGE] tabanni bot flagged a conversation.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`
       );
       await sendTelegramSpacer();
     }
@@ -209,6 +210,18 @@ async function handleMessagingEvent(event) {
   const senderId = event.sender?.id;
   const message = event.message;
   if (!message || !senderId) return;
+
+  // --- Deduplication: Instagram/Meta can redeliver the same webhook event ---
+  // (most commonly when Render's free tier is slow to wake up from sleep and
+  // Meta doesn't get a fast enough response). Without this, a redelivered
+  // message gets processed twice — two Claude API calls, two identical
+  // replies sent to the person, double the cost. This claims the message ID
+  // atomically; if it's already been claimed (a genuine duplicate), stop
+  // here immediately before doing anything else.
+  if (!(await claimIncomingMessage(message.mid))) {
+    console.log(`Skipped duplicate delivery of message ${message.mid} — already processed.`);
+    return;
+  }
 
   // --- Human handoff: is this message an "echo" of something a HUMAN sent ---
   // manually from the Instagram app? Instagram echoes back EVERY message sent
@@ -320,9 +333,10 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   // marker, send the warm acknowledgement anyway, then pause the bot on
   // this conversation so a volunteer picks up the actual answer.
   const HANDOFF_MARKER = '[[HANDOFF]]';
-  // --- Soft flag: notifies the team on Telegram but does NOT pause the ---
-  // bot. Used for things the team should be aware of (e.g. a report of
-  // animal cruelty) while the bot keeps handling the conversation normally.
+  // --- Flag: same as HANDOFF — pauses the bot on this conversation for ---
+  // 24 hours and notifies the team. Used for things that need a human's
+  // attention (e.g. an abuse report), just with different Telegram wording
+  // than a general handoff.
   const FLAG_MARKER = '[[FLAG]]';
   let outgoingText = reply;
   let needsHandoff = false;
@@ -365,13 +379,14 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
       await sendTelegramSpacer();
     });
   } else if (needsFlag) {
-    console.log(`🚩 Conversation with ${senderId} flagged for awareness — bot is still replying normally.`);
+    await setManualPause(senderId, true);
+    console.log(`🚩 Conversation with ${senderId} flagged — bot paused.`);
 
     const displayName = await getDisplayName();
 
     await queueTelegramCall(async () => {
       await sendTelegramNotification(
-        `🚩 tabanni bot flagged a message for awareness (bot is still handling this conversation, no action needed unless you want to step in).\n\nFrom: ${displayName}\nMessage: "${effectiveText}"`
+        `🚩 tabanni bot flagged a conversation!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nThe bot is paused on this conversation until you resume it (see README for /admin/resume).`
       );
       await sendTelegramSpacer();
     });

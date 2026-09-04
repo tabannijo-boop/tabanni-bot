@@ -3,9 +3,15 @@
 // file: turn "a pile of raw photos + text in a DM" into "one image your team
 // can open and tap Add to Story", no design work needed.
 //
+// Layout matches tabanni's reference template: a 2x2 photo collage across
+// the top, a light paper-textured background, a rounded "story" box with
+// the pet's info, a hand-lettered "CONTACT INFO:" label, and a rounded
+// contact box with the phone number at the very bottom.
+//
 // Uses sharp for compositing (fast, well-supported on Render) and embeds
-// real font files as base64 in an SVG overlay, so text renders identically
-// regardless of what fonts happen to be installed on the host.
+// real font files + tabanni's real logo as base64 in an SVG overlay, so it
+// renders identically regardless of what fonts/assets happen to exist on
+// the host.
 
 const sharp = require('sharp');
 const fs = require('fs');
@@ -13,21 +19,33 @@ const path = require('path');
 
 const CANVAS_W = 1080;
 const CANVAS_H = 1920;
-const PANEL_H = 720; // height of the bottom info panel
 
-const BRAND_ORANGE = '#FF8C00';
-const BRAND_DARK = '#2B2320';
-const BRAND_CREAM = '#FFFDF9';
+// tabanni's real brand colors
+const BRAND_NAVY = '#333E48';   // text color, matches the reference template
+const BRAND_TEAL = '#3D937F';
+const BRAND_ORANGE = '#FA8D29';
+const PAPER_BG = '#EEEEEE';     // off-white paper background
+const BOX_FILL = '#D9D9D9';     // grey content box fill, matches the reference
 
-// Fonts are embedded once at module load, not per-request.
+// Box positions, measured directly from the reference template image
+// (1080x1920), as fractions of the canvas so they scale correctly.
+const STORY_BOX = { x: 55, y: 1341, w: 970, h: 316, r: 32 };
+const CONTACT_LABEL_Y = 1725;
+const CONTACT_BOX = { x: 258, y: 1751, w: 564, h: 141, r: 32 };
+const PHOTO_AREA_H = 1300; // photo collage fills the top, down to just above the story box
+
+// Fonts and the logo are embedded once at module load, not per-request.
 const FONTS_DIR = path.join(__dirname, '..', 'fonts');
-function loadFontBase64(filename) {
-  return fs.readFileSync(path.join(FONTS_DIR, filename)).toString('base64');
+const ASSETS_DIR = path.join(__dirname, '..', 'assets');
+function loadFileBase64(dir, filename) {
+  return fs.readFileSync(path.join(dir, filename)).toString('base64');
 }
-const FONT_LATIN_REGULAR = loadFontBase64('NotoSans-Regular.woff2');
-const FONT_LATIN_MEDIUM = loadFontBase64('NotoSans-Medium.woff2');
-const FONT_ARABIC_REGULAR = loadFontBase64('NotoSansArabic-Regular.woff2');
-const FONT_ARABIC_MEDIUM = loadFontBase64('NotoSansArabic-Medium.woff2');
+const FONT_LATIN_REGULAR = loadFileBase64(FONTS_DIR, 'NotoSans-Regular.woff2');
+const FONT_LATIN_MEDIUM = loadFileBase64(FONTS_DIR, 'NotoSans-Medium.woff2');
+const FONT_ARABIC_REGULAR = loadFileBase64(FONTS_DIR, 'NotoSansArabic-Regular.woff2');
+const FONT_ARABIC_MEDIUM = loadFileBase64(FONTS_DIR, 'NotoSansArabic-Medium.woff2');
+const LOGO_ICON_BASE64 = loadFileBase64(ASSETS_DIR, 'tabanni-icon.png');
+const LOGO_ICON_ASPECT = 1750 / 1404;
 
 function isArabicText(text) {
   return /[\u0600-\u06FF]/.test(text || '');
@@ -42,8 +60,7 @@ function escapeXml(str) {
     .replace(/'/g, '&apos;');
 }
 
-// Very rough line-wrapping for the story caption. Good enough for a short
-// 1-2 line teaser, not meant for long paragraphs (see condenseStory below).
+// Very rough line-wrapping for the story caption.
 function wrapText(text, maxCharsPerLine, maxLines) {
   const words = String(text || '').split(/\s+/).filter(Boolean);
   const lines = [];
@@ -65,7 +82,6 @@ function wrapText(text, maxCharsPerLine, maxLines) {
   return lines;
 }
 
-// Fetches a photo and returns it resized/cropped to exactly fit a grid cell.
 async function fetchAndPrepPhoto(url, cellW, cellH) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch photo: ${res.status}`);
@@ -75,7 +91,8 @@ async function fetchAndPrepPhoto(url, cellW, cellH) {
     .toBuffer();
 }
 
-// Builds the grid layout (positions) for 1-4 photos across the top area.
+// Builds the grid layout for 1-4 photos. Always aims for a 2x2 feel when
+// 4 photos are available, per the reference template.
 function buildGridLayout(count, areaW, areaH) {
   const gap = 4;
   if (count <= 1) {
@@ -96,7 +113,6 @@ function buildGridLayout(count, areaW, areaH) {
       { x: (w + gap) * 2, y: 0, w: areaW - (w + gap) * 2, h: areaH },
     ];
   }
-  // 4 photos: 2x2 grid
   const w = Math.floor((areaW - gap) / 2);
   const h = Math.floor((areaH - gap) / 2);
   return [
@@ -105,6 +121,21 @@ function buildGridLayout(count, areaW, areaH) {
     { x: 0, y: h + gap, w, h: areaH - h - gap },
     { x: w + gap, y: h + gap, w: areaW - w - gap, h: areaH - h - gap },
   ];
+}
+
+// Generates a subtle paper-grain texture as an SVG filter, approximating
+// the reference template's kraft-paper background. This is a generated
+// approximation, not the exact source texture — if tabanni has the real
+// paper texture file, it can be swapped in directly for a closer match.
+function paperTextureSvg(w, h) {
+  return `
+    <filter id="paperGrain">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="noise"/>
+      <feColorMatrix in="noise" type="matrix" values="0 0 0 0 0.13  0 0 0 0 0.15  0 0 0 0 0.18  0 0 0 0.05 0"/>
+    </filter>
+    <rect width="${w}" height="${h}" fill="${PAPER_BG}" />
+    <rect width="${w}" height="${h}" filter="url(#paperGrain)" />
+  `;
 }
 
 /**
@@ -122,53 +153,54 @@ function buildGridLayout(count, areaW, areaH) {
  */
 async function generateStoryImage(info) {
   const photoUrls = (info.photoUrls || []).slice(0, 4);
-  const gridAreaH = CANVAS_H - PANEL_H;
 
-  // 1) Prepare the photo grid.
-  const layout = buildGridLayout(photoUrls.length, CANVAS_W, gridAreaH);
+  // 1) Prepare the 2x2 photo collage across the top.
+  const layout = buildGridLayout(photoUrls.length, CANVAS_W, PHOTO_AREA_H);
   const photoBuffers = await Promise.all(
     photoUrls.map((url, i) => fetchAndPrepPhoto(url, layout[i].w, layout[i].h).catch(() => null))
   );
-
-  let gridImage = sharp({
-    create: { width: CANVAS_W, height: gridAreaH, channels: 3, background: BRAND_DARK },
+  let photoLayer = sharp({
+    create: { width: CANVAS_W, height: PHOTO_AREA_H, channels: 3, background: BOX_FILL },
   });
   const compositeOps = [];
   photoBuffers.forEach((buf, i) => {
     if (buf) compositeOps.push({ input: buf, left: layout[i].x, top: layout[i].y });
   });
-  gridImage = gridImage.composite(compositeOps);
+  photoLayer = photoLayer.composite(compositeOps);
+  const photoBuffer = await photoLayer.png().toBuffer();
 
-  // 2) Build the info panel as SVG (logo, name, tags, story, phone), with
-  // real embedded fonts so it renders consistently everywhere.
+  // 2) Build the rest as one SVG overlay: paper background, story box
+  // (name + tags + description), "CONTACT INFO:" label, contact box.
   const isAr = isArabicText(info.name) || isArabicText(info.story);
   const fontFamily = isAr ? 'NotoSansArabic' : 'NotoSans';
-  const dir = isAr ? 'rtl' : 'ltr';
-  const textAnchorStart = isAr ? CANVAS_W - 64 : 64;
   const anchorAttr = isAr ? 'end' : 'start';
+  const padX = 40;
+  const textStartX = isAr ? STORY_BOX.x + STORY_BOX.w - padX : STORY_BOX.x + padX;
 
   const tags = [info.age, info.gender, info.vaccination].filter(Boolean);
-  const storyLines = wrapText(info.story, isAr ? 30 : 40, 2);
+  const storyLines = wrapText(info.story, isAr ? 34 : 46, 2);
 
-  let tagX = textAnchorStart;
+  let tagX = textStartX;
   const tagEls = [];
-  const tagY = 250;
+  const tagY = STORY_BOX.y + 82;
   for (const tag of tags) {
-    const tagW = escapeXml(tag).length * 15 + 40;
+    const tagW = escapeXml(tag).length * 13 + 36;
     const rectX = isAr ? tagX - tagW : tagX;
     tagEls.push(`
-      <rect x="${rectX}" y="${tagY}" width="${tagW}" height="54" rx="27" fill="rgba(255,255,255,0.12)" />
-      <text x="${rectX + tagW / 2}" y="${tagY + 36}" font-family="${fontFamily}" font-size="27" fill="${BRAND_CREAM}" text-anchor="middle">${escapeXml(tag)}</text>
+      <rect x="${rectX}" y="${tagY}" width="${tagW}" height="46" rx="23" fill="${BRAND_TEAL}" />
+      <text x="${rectX + tagW / 2}" y="${tagY + 30}" font-family="${fontFamily}" font-size="23" fill="#FFFFFF" text-anchor="middle">${escapeXml(tag)}</text>
     `);
-    tagX = isAr ? rectX - 14 : rectX + tagW + 14;
+    tagX = isAr ? rectX - 12 : rectX + tagW + 12;
   }
 
   const storyTspans = storyLines
-    .map((line, i) => `<tspan x="${textAnchorStart}" dy="${i === 0 ? 0 : 46}">${escapeXml(line)}</tspan>`)
+    .map((line, i) => `<tspan x="${textStartX}" dy="${i === 0 ? 0 : 38}">${escapeXml(line)}</tspan>`)
     .join('');
 
-  const panelSvg = `
-    <svg width="${CANVAS_W}" height="${PANEL_H}" xmlns="http://www.w3.org/2000/svg">
+  const contactLabelText = 'CONTACT INFO:';
+
+  const overlaySvg = `
+    <svg width="${CANVAS_W}" height="${CANVAS_H}" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <style>
           @font-face { font-family: 'NotoSans'; src: url(data:font/woff2;base64,${FONT_LATIN_REGULAR}) format('woff2'); font-weight: 400; }
@@ -177,36 +209,33 @@ async function generateStoryImage(info) {
           @font-face { font-family: 'NotoSansArabic'; src: url(data:font/woff2;base64,${FONT_ARABIC_MEDIUM}) format('woff2'); font-weight: 500; }
         </style>
       </defs>
-      <rect width="${CANVAS_W}" height="${PANEL_H}" fill="${BRAND_DARK}" />
 
-      <rect x="64" y="44" width="${escapeXml('up for adoption').length * 15 + 50}" height="60" rx="30" fill="${BRAND_ORANGE}" />
-      <text x="89" y="84" font-family="${fontFamily}" font-size="30" font-weight="500" fill="${BRAND_CREAM}">up for adoption</text>
+      ${paperTextureSvg(CANVAS_W, CANVAS_H)}
 
-      <text x="${textAnchorStart}" y="200" font-family="${fontFamily}" font-size="68" font-weight="500" fill="${BRAND_CREAM}" text-anchor="${anchorAttr}">${escapeXml(info.name)}</text>
+      <!-- Story box: name, tags, description -->
+      <rect x="${STORY_BOX.x}" y="${STORY_BOX.y}" width="${STORY_BOX.w}" height="${STORY_BOX.h}" rx="${STORY_BOX.r}" fill="${BOX_FILL}" />
+
+      <text x="${textStartX}" y="${STORY_BOX.y + 58}" font-family="${fontFamily}" font-size="46" font-weight="500" fill="${BRAND_NAVY}" text-anchor="${anchorAttr}">${escapeXml(info.name)}</text>
 
       ${tagEls.join('')}
 
-      <text x="${textAnchorStart}" y="370" font-family="${fontFamily}" font-size="36" fill="#D8D0C0" text-anchor="${anchorAttr}" font-style="italic">${storyTspans}</text>
+      <text x="${textStartX}" y="${tagY + 90}" font-family="${fontFamily}" font-size="28" fill="${BRAND_NAVY}" text-anchor="${anchorAttr}" font-style="italic">${storyTspans}</text>
 
-      <line x1="64" y1="${PANEL_H - 150}" x2="${CANVAS_W - 64}" y2="${PANEL_H - 150}" stroke="rgba(255,255,255,0.2)" stroke-width="2" />
+      <!-- "CONTACT INFO:" label -->
+      <text x="${CANVAS_W / 2}" y="${CONTACT_LABEL_Y}" font-family="${fontFamily}" font-size="34" font-weight="500" fill="${BRAND_NAVY}" text-anchor="middle" letter-spacing="1">${contactLabelText}</text>
 
-      <circle cx="102" cy="${PANEL_H - 84}" r="32" fill="${BRAND_ORANGE}" />
-      <text x="102" y="${PANEL_H - 73}" font-family="${fontFamily}" font-size="30" fill="${BRAND_CREAM}" text-anchor="middle">☎</text>
-      <text x="150" y="${PANEL_H - 68}" font-family="${fontFamily}" font-size="46" fill="${BRAND_CREAM}">${escapeXml(info.phone)}</text>
-
-      <circle cx="${CANVAS_W - 84}" cy="${PANEL_H - 84}" r="36" fill="${BRAND_CREAM}" />
-      <text x="${CANVAS_W - 84}" y="${PANEL_H - 72}" font-family="${fontFamily}" font-size="34" text-anchor="middle">🐾</text>
+      <!-- Contact box: phone number -->
+      <rect x="${CONTACT_BOX.x}" y="${CONTACT_BOX.y}" width="${CONTACT_BOX.w}" height="${CONTACT_BOX.h}" rx="${CONTACT_BOX.r}" fill="${BOX_FILL}" />
+      <text x="${CANVAS_W / 2}" y="${CONTACT_BOX.y + CONTACT_BOX.h / 2 + 14}" font-family="${fontFamily}" font-size="42" fill="${BRAND_NAVY}" text-anchor="middle">${escapeXml(info.phone)}</text>
     </svg>
   `;
 
-  const gridBuffer = await gridImage.png().toBuffer();
-
   const finalImage = await sharp({
-    create: { width: CANVAS_W, height: CANVAS_H, channels: 3, background: BRAND_DARK },
+    create: { width: CANVAS_W, height: CANVAS_H, channels: 3, background: PAPER_BG },
   })
     .composite([
-      { input: gridBuffer, left: 0, top: 0 },
-      { input: Buffer.from(panelSvg), left: 0, top: gridAreaH },
+      { input: Buffer.from(overlaySvg), left: 0, top: 0 },
+      { input: photoBuffer, left: 0, top: 0 },
     ])
     .png()
     .toBuffer();

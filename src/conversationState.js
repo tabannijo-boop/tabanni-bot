@@ -133,6 +133,26 @@ async function wasSentByBot(messageId) {
   return !!val;
 }
 
+// --- Incoming message deduplication -------------------------------------
+// Instagram (via Meta) can redeliver the same webhook event if it doesn't
+// get a fast enough response — most commonly right when Render's free tier
+// is waking up from sleep. Without this, a redelivered message gets
+// processed twice: two Claude API calls, two identical replies sent to the
+// person, and double the cost for one real message. This claims a message
+// ID atomically (via Redis SETNX) the first time it's seen, so a duplicate
+// delivery is recognized and skipped entirely, no matter how close together
+// the two deliveries arrive.
+const INCOMING_DEDUPE_WINDOW_SECONDS = 10 * 60; // covers any realistic retry window
+function incomingKey(messageId) {
+  return `tabanni:incoming:${messageId}`;
+}
+async function claimIncomingMessage(messageId) {
+  if (!messageId) return true; // no ID to dedupe on — let it through
+  // set with nx: true only succeeds if the key didn't already exist.
+  const result = await redis.set(incomingKey(messageId), '1', { ex: INCOMING_DEDUPE_WINDOW_SECONDS, nx: true });
+  return result !== null; // non-null means we successfully claimed it (first time seeing it)
+}
+
 module.exports = {
   isPaused,
   pauseAfterHumanReply,
@@ -144,4 +164,5 @@ module.exports = {
   wasSentByBot,
   addPhotoUrl,
   getPhotoUrls,
+  claimIncomingMessage,
 };

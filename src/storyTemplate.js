@@ -36,7 +36,7 @@ const PHOTO_AREA_H = 1300; // photo collage fills the top, down to just above th
 
 // Fonts and the logo are embedded once at module load, not per-request.
 const FONTS_DIR = path.join(__dirname, '..', 'fonts');
-const ASSETS_DIR = path.join(__dirname, '..', 'assets');
+const ASSETS_DIR = path.join(__dirname, '..', 'tabanni-assets');
 function loadFileBase64(dir, filename) {
   return fs.readFileSync(path.join(dir, filename)).toString('base64');
 }

@@ -55,10 +55,10 @@ async function getClaudeReply(history) {
       'anthropic-version': '2023-06-01',
       // Required to use the 1-hour cache TTL (instead of the 5-minute
       // default) — see the ttl: '1h' below.
-      'anthropic-beta': 'extended-cache-ttl-2025-04-11',
+
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
+model: 'claude-haiku-4-5',
       max_tokens: 500,
       // The system prompt (tabanni's whole knowledge base) is identical on
       // every single call and is by far the largest part of each request.
@@ -77,8 +77,7 @@ async function getClaudeReply(history) {
         {
           type: 'text',
           text: SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral', ttl: '1h' },
-        },
+cache_control: { type: 'ephemeral' },        },
       ],
       messages: history,
     }),

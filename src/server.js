@@ -241,17 +241,22 @@ async function handleMessagingEvent(event) {
   const userText = message.text;
   const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
 
-  if (hasAttachments) {
+   if (hasAttachments) {
     // Buffer this media instead of processing immediately — see flushMediaBatch.
     let batch = pendingMediaBatches.get(senderId);
     if (!batch) {
       batch = { items: [], texts: [], timer: null };
       pendingMediaBatches.set(senderId, batch);
-      batch.timer = setTimeout(() => {
-        flushMediaBatch(senderId).catch((err) => console.error('Media batch flush error:', err));
-      }, MEDIA_BATCH_WINDOW_MS);
     }
-    for (const att of message.attachments) {
+    // Reset the timer on every new arrival — this makes it a rolling
+    // "100 seconds of silence" window instead of a fixed one-shot window
+    // from the first photo, so someone sending photos in slow bursts over
+    // several minutes still gets bundled into ONE batch, not several.
+    if (batch.timer) clearTimeout(batch.timer);
+    batch.timer = setTimeout(() => {
+      flushMediaBatch(senderId).catch((err) => console.error('Media batch flush error:', err));
+    }, MEDIA_BATCH_WINDOW_MS);
+    for (const att of message.attachments) { 
       const attUrl = att?.payload?.url;
       if (!attUrl) continue;
       if (att.type === 'image' || att.type === 'video') {

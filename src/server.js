@@ -13,7 +13,7 @@ const {
   getPhotoUrls,
   claimIncomingMessage,
 } = require('./conversationState');
-const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, queueTelegramCall } = require('./apis');
+const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, queueTelegramCall, sendTelegramAlertPhoto } = require('./apis');
 const { generateStoryImage } = require('./storyTemplate');
 
 const app = express();
@@ -147,19 +147,24 @@ app.post('/telegram-webhook', async (req, res) => {
   const callbackQuery = req.body?.callback_query;
   if (!callbackQuery) return;
 
-  if (callbackQuery.data === 'toggle_posted') {
+  const TOGGLE_CONFIG = {
+    toggle_posted: { off: '☐ Not posted yet', on: '✅ Posted to Instagram', onMsg: 'Marked as posted!', offMsg: 'Marked as not posted' },
+    toggle_nursing: { off: '☐ Not handled yet', on: '✅ Handled', onMsg: 'Marked as handled!', offMsg: 'Marked as not handled' },
+  };
+
+  const config = TOGGLE_CONFIG[callbackQuery.data];
+  if (config) {
     const currentText = callbackQuery.message?.reply_markup?.inline_keyboard?.[0]?.[0]?.text || '';
-    const isCurrentlyPosted = currentText.includes('✅');
-    const newText = isCurrentlyPosted ? '☐ Not posted yet' : '✅ Posted to Instagram';
-    const newMarkup = { inline_keyboard: [[{ text: newText, callback_data: 'toggle_posted' }]] };
+    const isOn = currentText === config.on;
+    const newText = isOn ? config.off : config.on;
+    const newMarkup = { inline_keyboard: [[{ text: newText, callback_data: callbackQuery.data }]] };
 
     await editTelegramMessageReplyMarkup(callbackQuery.message.chat.id, callbackQuery.message.message_id, newMarkup);
-    await answerTelegramCallbackQuery(callbackQuery.id, isCurrentlyPosted ? 'Marked as not posted' : 'Marked as posted!');
+    await answerTelegramCallbackQuery(callbackQuery.id, isOn ? config.offMsg : config.onMsg);
   } else {
     await answerTelegramCallbackQuery(callbackQuery.id);
   }
 });
-
 // ---------------------------------------------------------------------------
 // 1) Webhook verification — Meta calls this once when you set up the webhook
 //    in the App Dashboard, to confirm you control this server.
@@ -342,16 +347,38 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   // 24 hours and notifies the team. Used for things that need a human's
   // attention (e.g. an abuse report), just with different Telegram wording
   // than a general handoff.
+    const HANDOFF_MARKER = '[[HANDOFF]]';
+  // --- Flag: same as HANDOFF — pauses the bot on this conversation for ---
+  // 24 hours and notifies the team. Used for things that need a human's
+  // attention (e.g. an abuse report), just with different Telegram wording
+  // than a general handoff.
   const FLAG_MARKER = '[[FLAG]]';
+  const NURSING_MARKER_START = '[[NURSING]]';
+  const NURSING_MARKER_END = '[[/NURSING]]';
+  function parseNursingMarker(r) {
+    if (!r.startsWith(NURSING_MARKER_START)) return null;
+    const endIdx = r.indexOf(NURSING_MARKER_END);
+    if (endIdx === -1) return null;
+    const summary = r.slice(NURSING_MARKER_START.length, endIdx).trim();
+    const outgoing = r.slice(endIdx + NURSING_MARKER_END.length).trim();
+    const phoneMatch = summary.match(/Phone number\s*:\s*(.+)/i);
+    return { phone: phoneMatch ? phoneMatch[1].trim() : '', outgoingText: outgoing };
+  }
+
   let outgoingText = reply;
   let needsHandoff = false;
   let needsFlag = false;
   let intakeSummary = null;
+  let nursingInfo = null;
 
   const intakeParsed = parseIntakeMarker(reply);
+  const nursingParsed = parseNursingMarker(reply);
   if (intakeParsed) {
     intakeSummary = intakeParsed.summary;
     outgoingText = intakeParsed.outgoingText;
+  } else if (nursingParsed) {
+    nursingInfo = nursingParsed;
+    outgoingText = nursingParsed.outgoingText;
   } else if (reply.startsWith(HANDOFF_MARKER)) {
     needsHandoff = true;
     outgoingText = reply.slice(HANDOFF_MARKER.length).trim();
@@ -448,13 +475,35 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
       await sendTelegramSpacer();
     });
 
-    // The intake task itself is done — your team's Telegram record now has
+      // The intake task itself is done — your team's Telegram record now has
     // everything needed (text summary + story image + checkbox to track
     // posting), so there's nothing further for the TEAM to do on this
     // conversation unless they choose to. But the bot stays fully active
     // and keeps replying normally if the person messages again (e.g. to
     // say thanks, or ask something else) — it is not paused.
     console.log(`✅ Adoption intake fully sent to Telegram for ${senderId} — bot remains active for this conversation.`);
+  } else if (nursingInfo) {
+    console.log(`🍼 Nursing mother case flagged for ${senderId}.`);
+
+    const displayName = await getDisplayName();
+    const allPhotoUrls = await getPhotoUrls(senderId);
+    const latestPhoto = allPhotoUrls[allPhotoUrls.length - 1];
+
+    await queueTelegramCall(async () => {
+      if (latestPhoto) {
+        await sendTelegramAlertPhoto(
+          `🍼 Nursing Mom Alert\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}`,
+          latestPhoto,
+          'toggle_nursing',
+          '☐ Not handled yet'
+        );
+      } else {
+        await sendTelegramNotification(
+          `🍼 Nursing Mom Alert (no photo received)\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}`
+        );
+      }
+      await sendTelegramSpacer();
+    });
   }
 }
 

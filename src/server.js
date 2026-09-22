@@ -165,6 +165,7 @@ app.post('/telegram-webhook', async (req, res) => {
     await answerTelegramCallbackQuery(callbackQuery.id);
   }
 });
+
 // ---------------------------------------------------------------------------
 // 1) Webhook verification — Meta calls this once when you set up the webhook
 //    in the App Dashboard, to confirm you control this server.
@@ -246,7 +247,7 @@ async function handleMessagingEvent(event) {
   const userText = message.text;
   const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
 
-   if (hasAttachments) {
+  if (hasAttachments) {
     // Buffer this media instead of processing immediately — see flushMediaBatch.
     let batch = pendingMediaBatches.get(senderId);
     if (!batch) {
@@ -261,7 +262,7 @@ async function handleMessagingEvent(event) {
     batch.timer = setTimeout(() => {
       flushMediaBatch(senderId).catch((err) => console.error('Media batch flush error:', err));
     }, MEDIA_BATCH_WINDOW_MS);
-    for (const att of message.attachments) { 
+    for (const att of message.attachments) {
       const attUrl = att?.payload?.url;
       if (!attUrl) continue;
       if (att.type === 'image' || att.type === 'video') {
@@ -323,10 +324,10 @@ async function flushMediaBatch(senderId) {
 }
 
 // Shared logic for handling one "turn": add the message to history, ask
-// Claude for a reply, act on any [[HANDOFF]] / [[FLAG]] / [[INTAKE]]
-// marker, send the reply, and fire the right Telegram notification. Used
-// by both a normal text message and a flushed media batch, so behavior is
-// identical either way.
+// Claude for a reply, act on any [[HANDOFF]] / [[FLAG]] / [[INTAKE]] /
+// [[NURSING]] marker, send the reply, and fire the right Telegram
+// notification. Used by both a normal text message and a flushed media
+// batch, so behavior is identical either way.
 async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   await addUserMessage(senderId, effectiveText);
 
@@ -343,11 +344,6 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   // marker, send the warm acknowledgement anyway, then pause the bot on
   // this conversation so a volunteer picks up the actual answer.
   const HANDOFF_MARKER = '[[HANDOFF]]';
-  // --- Flag: same as HANDOFF — pauses the bot on this conversation for ---
-  // 24 hours and notifies the team. Used for things that need a human's
-  // attention (e.g. an abuse report), just with different Telegram wording
-  // than a general handoff.
-    const HANDOFF_MARKER = '[[HANDOFF]]';
   // --- Flag: same as HANDOFF — pauses the bot on this conversation for ---
   // 24 hours and notifies the team. Used for things that need a human's
   // attention (e.g. an abuse report), just with different Telegram wording
@@ -475,7 +471,7 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
       await sendTelegramSpacer();
     });
 
-      // The intake task itself is done — your team's Telegram record now has
+    // The intake task itself is done — your team's Telegram record now has
     // everything needed (text summary + story image + checkbox to track
     // posting), so there's nothing further for the TEAM to do on this
     // conversation unless they choose to. But the bot stays fully active

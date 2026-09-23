@@ -262,12 +262,10 @@ async function handleMessagingEvent(event) {
     batch.timer = setTimeout(() => {
       flushMediaBatch(senderId).catch((err) => console.error('Media batch flush error:', err));
     }, MEDIA_BATCH_WINDOW_MS);
-    for (const att of message.attachments) {
+      for (const att of mediaAttachments) {
       const attUrl = att?.payload?.url;
       if (!attUrl) continue;
-      if (att.type === 'image' || att.type === 'video') {
-        batch.items.push({ url: attUrl, type: att.type });
-      }
+      batch.items.push({ url: attUrl, type: att.type });
     }
     if (userText) batch.texts.push(userText);
     console.log(`Buffered ${message.attachments.length} attachment(s) for ${senderId} — will flush in up to ${MEDIA_BATCH_WINDOW_MS / 1000}s.`);

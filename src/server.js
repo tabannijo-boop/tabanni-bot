@@ -245,7 +245,43 @@ async function handleMessagingEvent(event) {
   }
 
   const userText = message.text;
-  const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
+  const mediaAttachments = Array.isArray(message.attachments)
+    ? message.attachments.filter((a) => a.type === 'image' || a.type === 'video')
+    : [];
+  const otherAttachments = Array.isArray(message.attachments)
+    ? message.attachments.filter((a) => a.type !== 'image' && a.type !== 'video')
+    : [];
+  const hasAttachments = mediaAttachments.length > 0;
+
+  // Voice notes, audio, or any other attachment type we cannot process:
+  // no transcription built in, and reading it ourselves via AI isn't
+  // reliable, so this goes straight to a volunteer instead of trying to
+  // handle it automatically. Bypasses Claude entirely for speed/reliability.
+  if (!hasAttachments && otherAttachments.length > 0) {
+    if (pendingMediaBatches.has(senderId)) {
+      await flushMediaBatch(senderId);
+    }
+
+    const isArabic = /[\u0600-\u06FF]/.test(userText || '');
+    const ackText = isArabic
+      ? 'شكرا لرسالتكم. رح يتواصل معكم حد من الفريق قريبا للاستماع للرسالة الصوتية.'
+      : 'Thank you for your message. A member of our team will listen to your voice note and get back to you shortly.';
+    await sendInstagramReply(senderId, ackText);
+
+    await setManualPause(senderId, true);
+    console.log(`🎙️ Voice note/unsupported attachment from ${senderId} — bot paused, team alerted.`);
+
+    const profile = await getInstagramUserProfile(senderId);
+    const displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
+
+    await queueTelegramCall(async () => {
+      await sendTelegramNotification(
+        `🎙️ tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nSent a voice note or unsupported file type${userText ? `\nMessage text: "${userText}"` : ''}\n\nOpen Instagram DMs to listen and reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
+      );
+      await sendTelegramSpacer();
+    });
+    return;
+  }
 
   if (hasAttachments) {
     // Buffer this media instead of processing immediately — see flushMediaBatch.
@@ -262,13 +298,13 @@ async function handleMessagingEvent(event) {
     batch.timer = setTimeout(() => {
       flushMediaBatch(senderId).catch((err) => console.error('Media batch flush error:', err));
     }, MEDIA_BATCH_WINDOW_MS);
-      for (const att of mediaAttachments) {
+    for (const att of mediaAttachments) {
       const attUrl = att?.payload?.url;
       if (!attUrl) continue;
       batch.items.push({ url: attUrl, type: att.type });
     }
     if (userText) batch.texts.push(userText);
-    console.log(`Buffered ${message.attachments.length} attachment(s) for ${senderId} — will flush in up to ${MEDIA_BATCH_WINDOW_MS / 1000}s.`);
+    console.log(`Buffered ${mediaAttachments.length} attachment(s) for ${senderId} — will flush in up to ${MEDIA_BATCH_WINDOW_MS / 1000}s.`);
     return;
   }
 

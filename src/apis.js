@@ -53,31 +53,21 @@ async function getClaudeReply(history) {
       'Content-Type': 'application/json',
       'x-api-key': process.env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
-      // Required to use the 1-hour cache TTL (instead of the 5-minute
-      // default) — see the ttl: '1h' below.
-
     },
     body: JSON.stringify({
-model: 'claude-haiku-4-5',
+      model: 'claude-haiku-4-5',
       max_tokens: 500,
       // The system prompt (tabanni's whole knowledge base) is identical on
       // every single call and is by far the largest part of each request.
       // Marking it with cache_control lets Anthropic reuse it from cache
       // instead of reprocessing it from scratch every time — cached reads
       // cost 90% less than fresh input.
-      //
-      // Using the 1-hour TTL (not the 5-minute default) on purpose: real
-      // conversations here often take longer than 5 minutes between
-      // messages (someone answering the surrender checklist, finding
-      // photos, etc.), so the default 5-minute cache was expiring between
-      // messages and paying full price repeatedly. The 1-hour write costs
-      // a bit more up front (2x base price vs 1.25x for 5-min) but pays
-      // for itself easily across a realistic multi-message conversation.
       system: [
         {
           type: 'text',
           text: SYSTEM_PROMPT,
-cache_control: { type: 'ephemeral' },        },
+          cache_control: { type: 'ephemeral' },
+        },
       ],
       messages: history,
     }),
@@ -385,4 +375,39 @@ async function setTelegramWebhook(webhookUrl) {
   }
 }
 
-// Sends a photo alert to Telegram (e.g. a nursing-mother case) with its // own tappable checkbox, same pattern as the story-image checkbox but for // a plain photo instead of a generated composite. async function sendTelegramAlertPhoto(caption, photoUrl, callbackData, offLabel) {   const token = process.env.TELEGRAM_BOT_TOKEN;   const chatId = process.env.TELEGRAM_CHAT_ID;   if (!token || !chatId) {     console.log('(Telegram not configured — skipping alert photo send.)');     return null;   }   const url = `https://api.telegram.org/bot${token}/sendPhoto`;   try {     const res = await fetch(url, {       method: 'POST',       headers: { 'Content-Type': 'application/json' },       body: JSON.stringify({         chat_id: chatId,         photo: photoUrl,         caption,         reply_markup: { inline_keyboard: [[{ text: offLabel, callback_data: callbackData }]] },       }),     });     if (!res.ok) {       const errBody = await res.text();       console.error('Telegram alert photo send failed:', res.status, errBody);       return null;     }     const data = await res.json();     return { chatId: data.result?.chat?.id, messageId: data.result?.message_id };   } catch (err) {     console.error('Telegram alert photo send error:', err);     return null;   } }  module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, setTelegramWebhook, queueTelegramCall, sendTelegramAlertPhoto };
+// Sends a photo alert to Telegram (e.g. a nursing-mother case) with its
+// own tappable checkbox, same pattern as the story-image checkbox but for
+// a plain photo instead of a generated composite.
+async function sendTelegramAlertPhoto(caption, photoUrl, callbackData, offLabel) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.log('(Telegram not configured — skipping alert photo send.)');
+    return null;
+  }
+  const url = `https://api.telegram.org/bot${token}/sendPhoto`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        photo: photoUrl,
+        caption,
+        reply_markup: { inline_keyboard: [[{ text: offLabel, callback_data: callbackData }]] },
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Telegram alert photo send failed:', res.status, errBody);
+      return null;
+    }
+    const data = await res.json();
+    return { chatId: data.result?.chat?.id, messageId: data.result?.message_id };
+  } catch (err) {
+    console.error('Telegram alert photo send error:', err);
+    return null;
+  }
+}
+
+module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, setTelegramWebhook, queueTelegramCall, sendTelegramAlertPhoto };

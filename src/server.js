@@ -68,6 +68,22 @@ function parseIntakeMarker(reply) {
   return { summary, outgoingText };
 }
 
+// Same idea for the [[NURSING]] marker — a structured phone-number block
+// followed by the actual reply. Defined once here (module scope) so it can
+// be reused both by processTurn's marker handling and by the language
+// verification step below, instead of being redefined every call.
+const NURSING_MARKER_START = '[[NURSING]]';
+const NURSING_MARKER_END = '[[/NURSING]]';
+function parseNursingMarker(reply) {
+  if (!reply.startsWith(NURSING_MARKER_START)) return null;
+  const endIdx = reply.indexOf(NURSING_MARKER_END);
+  if (endIdx === -1) return null;
+  const summary = reply.slice(NURSING_MARKER_START.length, endIdx).trim();
+  const outgoing = reply.slice(endIdx + NURSING_MARKER_END.length).trim();
+  const phoneMatch = summary.match(/Phone number\s*:\s*(.+)/i);
+  return { phone: phoneMatch ? phoneMatch[1].trim() : '', outgoingText: outgoing };
+}
+
 // Pulls the labeled fields (Name, Type, Age, Gender, Vaccination status,
 // Phone number, Story) out of the [[INTAKE]] summary block, so they can be
 // passed to the story image generator as structured data instead of raw
@@ -90,6 +106,68 @@ function parseIntakeFields(summary) {
   };
 }
 
+// --- Language enforcement -------------------------------------------------
+// The prompt already instructs Claude to match the person's language, but
+// that's not 100% reliable on its own. This adds a real code-level check:
+// after getting a reply, compare the language of the person's last message
+// against the language of the actual outgoing (user-facing) text, and if
+// they don't match, retry once with an explicit correction.
+
+// Strips off any [[MARKER]]...[[/MARKER]] or [[MARKER]] prefix and returns
+// just the part that will actually be sent to the person — that's the only
+// part that needs to match their language (structured summaries like the
+// intake fields are internal, in English on purpose, and should not be
+// checked).
+function extractOutgoingText(reply) {
+  const intake = parseIntakeMarker(reply);
+  if (intake) return intake.outgoingText;
+  const nursing = parseNursingMarker(reply);
+  if (nursing) return nursing.outgoingText;
+  if (reply.startsWith('[[HANDOFF]]')) return reply.slice('[[HANDOFF]]'.length).trim();
+  if (reply.startsWith('[[FLAG]]')) return reply.slice('[[FLAG]]'.length).trim();
+  return reply;
+}
+
+// Simple language detector: counts Arabic-script characters vs Latin
+// letters. Returns 'ar', 'en', or null if the text is too ambiguous to
+// tell (e.g. just a phone number or emoji) — in that case we skip the
+// check rather than force a language based on no real signal.
+function detectLanguage(text) {
+  if (!text) return null;
+  const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length;
+  const latinChars = (text.match(/[A-Za-z]/g) || []).length;
+  if (arabicChars === 0 && latinChars === 0) return null;
+  return arabicChars > latinChars ? 'ar' : 'en';
+}
+
+// Wraps getClaudeReply with a language check + one automatic retry if the
+// reply came back in the wrong language. This is the real fix for language
+// mismatches — a prompt instruction alone was not reliable enough on its
+// own, this actually verifies the output before it gets sent.
+async function getVerifiedClaudeReply(history) {
+  const reply = await getClaudeReply(history);
+
+  const lastUserMsg = [...history].reverse().find((m) => m.role === 'user');
+  const expectedLang = detectLanguage(lastUserMsg?.content);
+  const actualLang = detectLanguage(extractOutgoingText(reply));
+
+  if (expectedLang && actualLang && expectedLang !== actualLang) {
+    const languageNames = { ar: 'Arabic', en: 'English' };
+    console.log(`⚠️ Language mismatch detected (expected ${languageNames[expectedLang]}, got ${languageNames[actualLang]}) — retrying once.`);
+    const correctionNote = `CRITICAL CORRECTION: your previous reply was in the wrong language. The person's most recent message was in ${languageNames[expectedLang]}. Rewrite your ENTIRE reply in ${languageNames[expectedLang]} only, keeping the same meaning and keeping any [[MARKER]] you used exactly as it was. Do not mix languages.`;
+    const retryReply = await getClaudeReply(history, correctionNote);
+    const retryLang = detectLanguage(extractOutgoingText(retryReply));
+    if (retryLang === expectedLang) {
+      console.log(`✅ Language corrected on retry.`);
+    } else {
+      console.log(`⚠️ Retry still did not match the expected language — sending it anyway (best effort, no further retries).`);
+    }
+    return retryReply;
+  }
+
+  return reply;
+}
+
 // ---------------------------------------------------------------------------
 // Team test page — a simple web chat at /test.html for your team to try the
 // bot's brain in a browser, no Instagram or Claude account needed. The
@@ -99,7 +177,7 @@ function parseIntakeFields(summary) {
 app.post('/api/test-chat', async (req, res) => {
   try {
     const history = Array.isArray(req.body.history) ? req.body.history : [];
-    const reply = await getClaudeReply(history);
+    const reply = await getVerifiedClaudeReply(history);
     const HANDOFF_MARKER = '[[HANDOFF]]';
     const FLAG_MARKER = '[[FLAG]]';
     let outgoingText = reply;
@@ -111,21 +189,27 @@ app.post('/api/test-chat', async (req, res) => {
     if (intakeParsed) {
       intake = true;
       outgoingText = intakeParsed.outgoingText;
-      await sendTelegramNotification(
-        `🧪🐾🆕 [TEST PAGE] New adoption intake ready to post!\n\n${intakeParsed.summary}\n\nThis came from the /test.html team test page, not real Instagram.`
+      await sendTelegramNotificationWithButton(
+        `🧪🐾🆕 [TEST PAGE] New adoption intake ready to post!\n\n${intakeParsed.summary}\n\nThis came from the /test.html team test page, not real Instagram.`,
+        'toggle_handled',
+        '☐ Not handled yet'
       );
       await sendTelegramSpacer();
     } else if (reply.startsWith(HANDOFF_MARKER)) {
       handoff = true;
       outgoingText = reply.slice(HANDOFF_MARKER.length).trim();
-      await sendTelegramNotification(
-        `🧪 [TEST PAGE] tabanni bot flagged a conversation for a volunteer.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`
+      await sendTelegramNotificationWithButton(
+        `🧪 [TEST PAGE] tabanni bot flagged a conversation for a volunteer.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`,
+        'toggle_handled',
+        '☐ Not handled yet'
       );
       await sendTelegramSpacer();
     } else if (reply.startsWith(FLAG_MARKER)) {
       outgoingText = reply.slice(FLAG_MARKER.length).trim();
-      await sendTelegramNotification(
-        `🧪🚩 [TEST PAGE] tabanni bot flagged a conversation.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`
+      await sendTelegramNotificationWithButton(
+        `🧪🚩 [TEST PAGE] tabanni bot flagged a conversation.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`,
+        'toggle_handled',
+        '☐ Not handled yet'
       );
       await sendTelegramSpacer();
     }
@@ -362,10 +446,11 @@ async function flushMediaBatch(senderId) {
 }
 
 // Shared logic for handling one "turn": add the message to history, ask
-// Claude for a reply, act on any [[HANDOFF]] / [[FLAG]] / [[INTAKE]] /
-// [[NURSING]] marker, send the reply, and fire the right Telegram
-// notification. Used by both a normal text message and a flushed media
-// batch, so behavior is identical either way.
+// Claude for a reply (with a language check + retry), act on any
+// [[HANDOFF]] / [[FLAG]] / [[INTAKE]] / [[NURSING]] marker, send the
+// reply, and fire the right Telegram notification. Used by both a normal
+// text message and a flushed media batch, so behavior is identical either
+// way.
 async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   await addUserMessage(senderId, effectiveText);
 
@@ -374,7 +459,7 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     return;
   }
 
-  const reply = await getClaudeReply(await getHistory(senderId));
+  const reply = await getVerifiedClaudeReply(await getHistory(senderId));
   await addAssistantMessage(senderId, reply);
 
   // --- Human handoff: did Claude flag this as something it can't safely ---
@@ -387,17 +472,6 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   // attention (e.g. an abuse report), just with different Telegram wording
   // than a general handoff.
   const FLAG_MARKER = '[[FLAG]]';
-  const NURSING_MARKER_START = '[[NURSING]]';
-  const NURSING_MARKER_END = '[[/NURSING]]';
-  function parseNursingMarker(r) {
-    if (!r.startsWith(NURSING_MARKER_START)) return null;
-    const endIdx = r.indexOf(NURSING_MARKER_END);
-    if (endIdx === -1) return null;
-    const summary = r.slice(NURSING_MARKER_START.length, endIdx).trim();
-    const outgoing = r.slice(endIdx + NURSING_MARKER_END.length).trim();
-    const phoneMatch = summary.match(/Phone number\s*:\s*(.+)/i);
-    return { phone: phoneMatch ? phoneMatch[1].trim() : '', outgoingText: outgoing };
-  }
 
   let outgoingText = reply;
   let needsHandoff = false;
@@ -507,7 +581,11 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
           `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
         );
       } else if (imageGenError) {
-        await sendTelegramNotification('⚠️ Could not auto-generate the story image for the intake above — please build it manually this time.');
+        await sendTelegramNotificationWithButton(
+          '⚠️ Could not auto-generate the story image for the intake above — please build it manually this time.',
+          'toggle_handled',
+          '☐ Not handled yet'
+        );
       }
 
       await sendTelegramSpacer();

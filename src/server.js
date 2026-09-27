@@ -13,7 +13,8 @@ const {
   getPhotoUrls,
   claimIncomingMessage,
 } = require('./conversationState');
-const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, queueTelegramCall, sendTelegramAlertPhoto, sendTelegramNotificationWithButton } = require('./apis');const { generateStoryImage } = require('./storyTemplate');
+const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, queueTelegramCall, sendTelegramAlertPhoto, sendTelegramNotificationWithButton } = require('./apis');
+const { generateStoryImage } = require('./storyTemplate');
 
 const app = express();
 app.use(express.json());
@@ -136,9 +137,10 @@ app.post('/api/test-chat', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Telegram webhook — receives button-tap events (the "posted / not posted"
-// checkbox on story images). Separate from the Instagram webhook above.
-// One-time setup required — see README.
+// Telegram webhook — receives button-tap events (the checkboxes on story
+// images, nursing-mom alerts, handoffs, flags, and voice-note alerts).
+// Separate from the Instagram webhook above. One-time setup required —
+// see README.
 // ---------------------------------------------------------------------------
 app.post('/telegram-webhook', async (req, res) => {
   res.sendStatus(200);
@@ -149,6 +151,7 @@ app.post('/telegram-webhook', async (req, res) => {
   const TOGGLE_CONFIG = {
     toggle_posted: { off: '☐ Not posted yet', on: '✅ Posted to Instagram', onMsg: 'Marked as posted!', offMsg: 'Marked as not posted' },
     toggle_nursing: { off: '☐ Not handled yet', on: '✅ Handled', onMsg: 'Marked as handled!', offMsg: 'Marked as not handled' },
+    toggle_handled: { off: '☐ Not handled yet', on: '✅ Handled by team', onMsg: 'Marked as handled!', offMsg: 'Marked as not handled' },
   };
 
   const config = TOGGLE_CONFIG[callbackQuery.data];
@@ -274,8 +277,10 @@ async function handleMessagingEvent(event) {
     const displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
 
     await queueTelegramCall(async () => {
-      await sendTelegramNotification(
-        `🎙️ tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nSent a voice note or unsupported file type${userText ? `\nMessage text: "${userText}"` : ''}\n\nOpen Instagram DMs to listen and reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
+      await sendTelegramNotificationWithButton(
+        `🎙️ tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nSent a voice note or unsupported file type${userText ? `\nMessage text: "${userText}"` : ''}\n\nOpen Instagram DMs to listen and reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`,
+        'toggle_handled',
+        '☐ Not handled yet'
       );
       await sendTelegramSpacer();
     });
@@ -434,8 +439,10 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     // the shared Telegram queue, so it can never get split up by another
     // conversation's messages landing in between.
     await queueTelegramCall(async () => {
-      await sendTelegramNotification(
-        `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`
+      await sendTelegramNotificationWithButton(
+        `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`,
+        'toggle_handled',
+        '☐ Not handled yet'
       );
       await sendTelegramSpacer();
     });
@@ -446,8 +453,10 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     const displayName = await getDisplayName();
 
     await queueTelegramCall(async () => {
-      await sendTelegramNotification(
-        `🚩 tabanni bot flagged a conversation!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nThe bot is paused on this conversation until you resume it (see README for /admin/resume).`
+      await sendTelegramNotificationWithButton(
+        `🚩 tabanni bot flagged a conversation!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nThe bot is paused on this conversation until you resume it (see README for /admin/resume).`,
+        'toggle_handled',
+        '☐ Not handled yet'
       );
       await sendTelegramSpacer();
     });
@@ -527,8 +536,10 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
           '☐ Not handled yet'
         );
       } else {
-        await sendTelegramNotification(
-          `🍼 Nursing Mom Alert (no photo received)\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}`
+        await sendTelegramNotificationWithButton(
+          `🍼 Nursing Mom Alert (no photo received)\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}`,
+          'toggle_handled',
+          '☐ Not handled yet'
         );
       }
       await sendTelegramSpacer();

@@ -339,19 +339,21 @@ async function handleMessagingEvent(event) {
     : [];
   const hasAttachments = mediaAttachments.length > 0;
 
-  // Voice notes, audio, or any other attachment type we cannot process:
-  // no transcription built in, and reading it ourselves via AI isn't
-  // reliable, so this goes straight to a volunteer instead of trying to
-  // handle it automatically. Bypasses Claude entirely for speed/reliability.
+  // Voice notes, story mentions, post/reel shares, or any other attachment
+  // type we cannot process automatically (Meta labels these with types
+  // like audio, story_mention, share, ig_post, reel, ig_reel — none of
+  // which are image/video, so they land here rather than being treated as
+  // real photos/videos): goes straight to a volunteer with a general
+  // acknowledgment, instead of trying to handle it automatically. Bypasses
+  // Claude entirely for speed/reliability.
   if (!hasAttachments && otherAttachments.length > 0) {
     if (pendingMediaBatches.has(senderId)) {
       await flushMediaBatch(senderId);
     }
 
-    const isArabic = /[\u0600-\u06FF]/.test(userText || '');
-    const ackText = isArabic
-      ? 'شكرا لرسالتكم. رح يتواصل معكم حد من الفريق قريبا للاستماع للرسالة الصوتية.'
-      : 'Thank you for your message. A member of our team will listen to your voice note and get back to you shortly.';
+    // Sent in both languages together, since there's often no text to
+    // detect a language from (e.g. a bare story mention with no caption).
+    const ackText = 'شكراً لرسالتكم سيتم الرد عليكم من قبل احد متطوعين تبني بأسرع وقت ممكن\n\nThank you for your message. One of tabanni\'s volunteers will get back to you as soon as possible.';
     await sendInstagramReply(senderId, ackText);
 
     await setManualPause(senderId, true);
@@ -440,226 +442,4 @@ async function flushMediaBatch(senderId) {
   if (photoCount) kindParts.push(`${photoCount} photo(s)`);
   if (videoCount) kindParts.push(`${videoCount} video(s)`);
   const attachmentNote = `[sent ${kindParts.join(' and ')}]`;
-  const effectiveText = batch.texts.length ? `${batch.texts.join(' ')} ${attachmentNote}` : attachmentNote;
-
-  await processTurn(senderId, effectiveText, displayName);
-}
-
-// Shared logic for handling one "turn": add the message to history, ask
-// Claude for a reply (with a language check + retry), act on any
-// [[HANDOFF]] / [[FLAG]] / [[INTAKE]] / [[NURSING]] marker, send the
-// reply, and fire the right Telegram notification. Used by both a normal
-// text message and a flushed media batch, so behavior is identical either
-// way.
-async function processTurn(senderId, effectiveText, precomputedDisplayName) {
-  await addUserMessage(senderId, effectiveText);
-
-  if (await isPaused(senderId)) {
-    console.log(`Conversation with ${senderId} is paused — bot staying quiet.`);
-    return;
-  }
-
-  const reply = await getVerifiedClaudeReply(await getHistory(senderId));
-  await addAssistantMessage(senderId, reply);
-
-  // --- Human handoff: did Claude flag this as something it can't safely ---
-  // answer (e.g. real-time animal availability)? If so, strip the silent
-  // marker (wherever it appears in the reply, not just as a strict
-  // prefix), send the warm acknowledgement anyway, then pause the bot on
-  // this conversation so a volunteer picks up the actual answer.
-  const HANDOFF_MARKER = '[[HANDOFF]]';
-  // --- Flag: same as HANDOFF — pauses the bot on this conversation for ---
-  // 24 hours and notifies the team. Used for things that need a human's
-  // attention (e.g. an abuse report), just with different Telegram wording
-  // than a general handoff.
-  const FLAG_MARKER = '[[FLAG]]';
-
-  let outgoingText = reply;
-  let needsHandoff = false;
-  let needsFlag = false;
-  let intakeSummary = null;
-  let nursingInfo = null;
-
-  const intakeParsed = parseIntakeMarker(reply);
-  const nursingParsed = parseNursingMarker(reply);
-  if (intakeParsed) {
-    intakeSummary = intakeParsed.summary;
-    outgoingText = intakeParsed.outgoingText;
-  } else if (nursingParsed) {
-    nursingInfo = nursingParsed;
-    outgoingText = nursingParsed.outgoingText;
-  } else if (reply.includes(HANDOFF_MARKER)) {
-    // Normally the marker is the very first characters of the reply, but
-    // the model can occasionally place it elsewhere (e.g. at the end).
-    // Searching for it anywhere and stripping it out, rather than
-    // requiring it to be a strict prefix, prevents the raw marker text
-    // from ever leaking into what the person actually sees, and ensures
-    // the handoff/notification logic below still fires correctly either
-    // way.
-    needsHandoff = true;
-    outgoingText = reply.split(HANDOFF_MARKER).join('').trim();
-  } else if (reply.includes(FLAG_MARKER)) {
-    needsFlag = true;
-    outgoingText = reply.split(FLAG_MARKER).join('').trim();
-  }
-
-  await sendInstagramReply(senderId, outgoingText);
-
-  const getDisplayName = async () => {
-    if (precomputedDisplayName) return precomputedDisplayName;
-    const profile = await getInstagramUserProfile(senderId);
-    return profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
-  };
-
-  if (needsHandoff) {
-    await setManualPause(senderId, true);
-    console.log(`⚠️ Conversation with ${senderId} flagged for a volunteer — bot paused.`);
-
-    const displayName = await getDisplayName();
-
-    // The whole block (notification + spacer) runs as ONE atomic unit on
-    // the shared Telegram queue, so it can never get split up by another
-    // conversation's messages landing in between.
-    await queueTelegramCall(async () => {
-      await sendTelegramNotificationWithButton(
-        `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`,
-        'toggle_handled',
-        '☐ Not handled yet'
-      );
-      await sendTelegramSpacer();
-    });
-  } else if (needsFlag) {
-    await setManualPause(senderId, true);
-    console.log(`🚩 Conversation with ${senderId} flagged — bot paused.`);
-
-    const displayName = await getDisplayName();
-
-    await queueTelegramCall(async () => {
-      await sendTelegramNotificationWithButton(
-        `🚩 tabanni bot flagged a conversation!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nThe bot is paused on this conversation until you resume it (see README for /admin/resume).`,
-        'toggle_handled',
-        '☐ Not handled yet'
-      );
-      await sendTelegramSpacer();
-    });
-  } else if (intakeSummary) {
-    console.log(`🆕 Adoption intake ready for ${senderId} — generating story image.`);
-
-    const displayName = await getDisplayName();
-
-    // Do the slow part (fetching photos, compositing the image) BEFORE
-    // touching the Telegram queue, so this conversation's image generation
-    // time doesn't hold up other conversations' Telegram messages. Only
-    // the actual sends get queued as one atomic block below.
-    let imageBuffer = null;
-    let fields = null;
-    let imageGenError = null;
-    try {
-      fields = parseIntakeFields(intakeSummary);
-      const allPhotoUrls = await getPhotoUrls(senderId);
-      const photoUrls = allPhotoUrls.slice(-4); // most recent 4
-      if (photoUrls.length > 0 && fields.name) {
-        imageBuffer = await generateStoryImage({
-          photoUrls,
-          name: fields.name,
-          animalType: fields.animalType,
-          age: fields.age,
-          gender: fields.gender,
-          vaccination: fields.vaccination,
-          story: fields.story,
-          phone: fields.phone,
-        });
-      } else {
-        console.log(`Skipped story image for ${senderId}: missing photos or name.`);
-      }
-    } catch (err) {
-      console.error('Story image generation failed:', err);
-      imageGenError = err;
-    }
-
-    await queueTelegramCall(async () => {
-      await sendTelegramNotification(
-        `🐾🆕 New adoption intake ready to post!\n\nFrom: ${displayName}\n\n${intakeSummary}`
-      );
-
-      if (imageBuffer && fields) {
-        await sendTelegramStoryImage(
-          `🖼️ Ready-to-post story card for ${fields.name} — save and add to Instagram Stories. Tap the checkbox below once it is posted.`,
-          imageBuffer,
-          `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
-        );
-      } else if (imageGenError) {
-        await sendTelegramNotificationWithButton(
-          '⚠️ Could not auto-generate the story image for the intake above — please build it manually this time.',
-          'toggle_handled',
-          '☐ Not handled yet'
-        );
-      }
-
-      await sendTelegramSpacer();
-    });
-
-    // The intake task itself is done — your team's Telegram record now has
-    // everything needed (text summary + story image + checkbox to track
-    // posting), so there's nothing further for the TEAM to do on this
-    // conversation unless they choose to. But the bot stays fully active
-    // and keeps replying normally if the person messages again (e.g. to
-    // say thanks, or ask something else) — it is not paused.
-    console.log(`✅ Adoption intake fully sent to Telegram for ${senderId} — bot remains active for this conversation.`);
-  } else if (nursingInfo) {
-    console.log(`🍼 Nursing mother case flagged for ${senderId}.`);
-
-    const displayName = await getDisplayName();
-    const allPhotoUrls = await getPhotoUrls(senderId);
-    const latestPhoto = allPhotoUrls[allPhotoUrls.length - 1];
-
-    await queueTelegramCall(async () => {
-      if (latestPhoto) {
-        await sendTelegramAlertPhoto(
-          `🍼 Nursing Mom Alert\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}`,
-          latestPhoto,
-          'toggle_nursing',
-          '☐ Not handled yet'
-        );
-      } else {
-        await sendTelegramNotificationWithButton(
-          `🍼 Nursing Mom Alert (no photo received)\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}`,
-          'toggle_handled',
-          '☐ Not handled yet'
-        );
-      }
-      await sendTelegramSpacer();
-    });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 3) Admin controls — pause/resume a conversation manually. This is meant to
-//    be called from a small internal tool or even just curl/Postman for now;
-//    wire up a real dashboard button later if you want.
-// ---------------------------------------------------------------------------
-function checkAdminSecret(req, res, next) {
-  const provided = req.headers['x-admin-secret'];
-  if (provided !== process.env.ADMIN_SECRET) return res.sendStatus(401);
-  next();
-}
-
-app.post('/admin/pause', checkAdminSecret, async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: 'userId required' });
-  await setManualPause(userId, true);
-  res.json({ ok: true, userId, paused: true });
-});
-
-app.post('/admin/resume', checkAdminSecret, async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: 'userId required' });
-  await setManualPause(userId, false);
-  res.json({ ok: true, userId, paused: false });
-});
-
-// Simple health check for your hosting provider.
-app.get('/', (req, res) => res.send('tabanni bot is running 🐾'));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`tabanni bot listening on port ${PORT}`));
+  const effectiveText =

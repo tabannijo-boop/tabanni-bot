@@ -113,19 +113,19 @@ function parseIntakeFields(summary) {
 // against the language of the actual outgoing (user-facing) text, and if
 // they don't match, retry once with an explicit correction.
 
-// Strips off any [[MARKER]]...[[/MARKER]] or [[MARKER]] prefix and returns
-// just the part that will actually be sent to the person — that's the only
-// part that needs to match their language (structured summaries like the
-// intake fields are internal, in English on purpose, and should not be
-// checked).
+// Strips off any [[MARKER]]...[[/MARKER]] or [[MARKER]] tag, wherever it
+// appears in the reply, and returns just the part that will actually be
+// sent to the person — that's the only part that needs to match their
+// language (structured summaries like the intake fields are internal, in
+// English on purpose, and should not be checked). Using a global find/strip
+// rather than requiring the marker to be a strict prefix, since the model
+// can occasionally place it elsewhere in the reply.
 function extractOutgoingText(reply) {
   const intake = parseIntakeMarker(reply);
   if (intake) return intake.outgoingText;
   const nursing = parseNursingMarker(reply);
   if (nursing) return nursing.outgoingText;
-  if (reply.startsWith('[[HANDOFF]]')) return reply.slice('[[HANDOFF]]'.length).trim();
-  if (reply.startsWith('[[FLAG]]')) return reply.slice('[[FLAG]]'.length).trim();
-  return reply;
+  return reply.split('[[HANDOFF]]').join('').split('[[FLAG]]').join('').trim();
 }
 
 // Simple language detector: counts Arabic-script characters vs Latin
@@ -195,17 +195,17 @@ app.post('/api/test-chat', async (req, res) => {
         '☐ Not handled yet'
       );
       await sendTelegramSpacer();
-    } else if (reply.startsWith(HANDOFF_MARKER)) {
+    } else if (reply.includes(HANDOFF_MARKER)) {
       handoff = true;
-      outgoingText = reply.slice(HANDOFF_MARKER.length).trim();
+      outgoingText = reply.split(HANDOFF_MARKER).join('').trim();
       await sendTelegramNotificationWithButton(
         `🧪 [TEST PAGE] tabanni bot flagged a conversation for a volunteer.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`,
         'toggle_handled',
         '☐ Not handled yet'
       );
       await sendTelegramSpacer();
-    } else if (reply.startsWith(FLAG_MARKER)) {
-      outgoingText = reply.slice(FLAG_MARKER.length).trim();
+    } else if (reply.includes(FLAG_MARKER)) {
+      outgoingText = reply.split(FLAG_MARKER).join('').trim();
       await sendTelegramNotificationWithButton(
         `🧪🚩 [TEST PAGE] tabanni bot flagged a conversation.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`,
         'toggle_handled',
@@ -464,7 +464,8 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
 
   // --- Human handoff: did Claude flag this as something it can't safely ---
   // answer (e.g. real-time animal availability)? If so, strip the silent
-  // marker, send the warm acknowledgement anyway, then pause the bot on
+  // marker (wherever it appears in the reply, not just as a strict
+  // prefix), send the warm acknowledgement anyway, then pause the bot on
   // this conversation so a volunteer picks up the actual answer.
   const HANDOFF_MARKER = '[[HANDOFF]]';
   // --- Flag: same as HANDOFF — pauses the bot on this conversation for ---
@@ -487,12 +488,19 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   } else if (nursingParsed) {
     nursingInfo = nursingParsed;
     outgoingText = nursingParsed.outgoingText;
-  } else if (reply.startsWith(HANDOFF_MARKER)) {
+  } else if (reply.includes(HANDOFF_MARKER)) {
+    // Normally the marker is the very first characters of the reply, but
+    // the model can occasionally place it elsewhere (e.g. at the end).
+    // Searching for it anywhere and stripping it out, rather than
+    // requiring it to be a strict prefix, prevents the raw marker text
+    // from ever leaking into what the person actually sees, and ensures
+    // the handoff/notification logic below still fires correctly either
+    // way.
     needsHandoff = true;
-    outgoingText = reply.slice(HANDOFF_MARKER.length).trim();
-  } else if (reply.startsWith(FLAG_MARKER)) {
+    outgoingText = reply.split(HANDOFF_MARKER).join('').trim();
+  } else if (reply.includes(FLAG_MARKER)) {
     needsFlag = true;
-    outgoingText = reply.slice(FLAG_MARKER.length).trim();
+    outgoingText = reply.split(FLAG_MARKER).join('').trim();
   }
 
   await sendInstagramReply(senderId, outgoingText);

@@ -256,4 +256,189 @@ async function sendTelegramStoryImage(caption, imageBuffer, filename = 'tabanni_
 
 // Sends multiple photos/videos to Telegram as one grouped album (instead of
 // separate messages), so a batch of adoption-story media arrives together
-// with one caption instead of flooding the chat. Telegram
+// with one caption instead of flooding the chat. Telegram requires at least
+// 2 items per group and caps each group at 10, so this chunks larger
+// batches and falls back to a single photo/video send for a lone item.
+async function sendTelegramMediaGroup(caption, items) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.log('(Telegram not configured — skipping media group send.)');
+    return false;
+  }
+  if (!items || items.length === 0) return false;
+
+  if (items.length === 1) {
+    const item = items[0];
+    return item.type === 'video' ? sendTelegramVideo(caption, item.url) : sendTelegramPhoto(caption, item.url);
+  }
+
+  const chunks = [];
+  for (let i = 0; i < items.length; i += 10) chunks.push(items.slice(i, i + 10));
+
+  let allOk = true;
+  for (let c = 0; c < chunks.length; c++) {
+    const chunkItems = chunks[c];
+    if (chunkItems.length === 1) {
+      const item = chunkItems[0];
+      const ok = item.type === 'video' ? await sendTelegramVideo(c === 0 ? caption : '', item.url) : await sendTelegramPhoto(c === 0 ? caption : '', item.url);
+      allOk = allOk && ok;
+      continue;
+    }
+    const media = chunkItems.map((item, i) => ({
+      type: item.type === 'video' ? 'video' : 'photo',
+      media: item.url,
+      ...(c === 0 && i === 0 ? { caption } : {}),
+    }));
+    const url = `https://api.telegram.org/bot${token}/sendMediaGroup`;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, media }),
+      });
+      if (!res.ok) {
+        const errBody = await res.text();
+        console.error('Telegram media group send failed:', res.status, errBody);
+      }
+      allOk = allOk && res.ok;
+    } catch (err) {
+      console.error('Telegram media group error:', err);
+      allOk = false;
+    }
+  }
+  return allOk;
+}
+
+// Called when someone taps the "posted / not posted" checkbox button on a
+// story image message — edits that exact message's button to reflect the
+// new state.
+async function editTelegramMessageReplyMarkup(chatId, messageId, replyMarkup) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return false;
+  const url = `https://api.telegram.org/bot${token}/editMessageReplyMarkup`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: replyMarkup }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Edit reply markup failed:', res.status, errBody);
+    }
+    return res.ok;
+  } catch (err) {
+    console.error('Edit reply markup error:', err);
+    return false;
+  }
+}
+
+// Required by Telegram whenever a button is tapped — clears the little
+// loading spinner on the button, optionally shows a brief toast.
+async function answerTelegramCallbackQuery(callbackQueryId, text = '') {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return false;
+  const url = `https://api.telegram.org/bot${token}/answerCallbackQuery`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+    });
+    return res.ok;
+  } catch (err) {
+    console.error('Answer callback query error:', err);
+    return false;
+  }
+}
+
+// One-time setup call — tells Telegram where to send button-tap events.
+// See README for how/when to run this.
+async function setTelegramWebhook(webhookUrl) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return false;
+  const url = `https://api.telegram.org/bot${token}/setWebhook`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: webhookUrl }),
+    });
+    const data = await res.json();
+    console.log('Telegram setWebhook result:', JSON.stringify(data));
+    return res.ok;
+  } catch (err) {
+    console.error('setWebhook error:', err);
+    return false;
+  }
+}
+
+// Sends a photo alert to Telegram (e.g. a nursing-mother case) with its
+// own tappable checkbox, same pattern as the story-image checkbox but for
+// a plain photo instead of a generated composite.
+async function sendTelegramAlertPhoto(caption, photoUrl, callbackData, offLabel) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.log('(Telegram not configured — skipping alert photo send.)');
+    return null;
+  }
+  const url = `https://api.telegram.org/bot${token}/sendPhoto`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        photo: photoUrl,
+        caption,
+        reply_markup: { inline_keyboard: [[{ text: offLabel, callback_data: callbackData }]] },
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Telegram alert photo send failed:', res.status, errBody);
+      return null;
+    }
+    const data = await res.json();
+    return { chatId: data.result?.chat?.id, messageId: data.result?.message_id };
+  } catch (err) {
+    console.error('Telegram alert photo send error:', err);
+    return null;
+  }
+}
+
+// Sends a plain text alert to Telegram with its own tappable checkbox, so
+// handoffs, flags, and other text-only alerts can be tracked as "done" the
+// same way the story-image and nursing-mom photo alerts already are.
+async function sendTelegramNotificationWithButton(text, callbackData, offLabel) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.log('(Telegram not configured — skipping notification. See README to set it up.)');
+    return false;
+  }
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        reply_markup: { inline_keyboard: [[{ text: offLabel, callback_data: callbackData }]] },
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Telegram notification (with button) failed:', res.status, errBody);
+    }
+    return res.ok;
+  } catch (err) {
+    console.error('Telegram notification (with button) error:', err);
+    return false;
+  }
+}
+
+module.exports = { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, setTelegramWebhook, queueTelegramCall, sendTelegramAlertPhoto, sendTelegramNotificationWithButton };

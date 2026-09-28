@@ -222,9 +222,9 @@ app.post('/api/test-chat', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // Telegram webhook — receives button-tap events (the checkboxes on story
-// images, nursing-mom alerts, handoffs, flags, and voice-note alerts).
-// Separate from the Instagram webhook above. One-time setup required —
-// see README.
+// images, nursing-mom alerts, handoffs, flags, and unsupported-attachment
+// alerts). Separate from the Instagram webhook above. One-time setup
+// required — see README.
 // ---------------------------------------------------------------------------
 app.post('/telegram-webhook', async (req, res) => {
   res.sendStatus(200);
@@ -339,32 +339,39 @@ async function handleMessagingEvent(event) {
     : [];
   const hasAttachments = mediaAttachments.length > 0;
 
-  // Voice notes, story mentions, post/reel shares, or any other attachment
-  // type we cannot process automatically (Meta labels these with types
-  // like audio, story_mention, share, ig_post, reel, ig_reel — none of
-  // which are image/video, so they land here rather than being treated as
-  // real photos/videos): goes straight to a volunteer with a general
-  // acknowledgment, instead of trying to handle it automatically. Bypasses
-  // Claude entirely for speed/reliability.
-  if (!hasAttachments && otherAttachments.length > 0) {
-    if (pendingMediaBatches.has(senderId)) {
-      await flushMediaBatch(senderId);
-    }
+  // Voice notes specifically: the bot cannot transcribe audio, but this is
+  // fully self-resolvable by just asking the person to type instead, so no
+  // human needs to get involved. No pause, no Telegram alert, bot stays
+  // fully active and ready for their next (typed) message.
+  const voiceNoteAttachments = otherAttachments.filter((a) => a.type === 'audio');
+  const trulyUnsupportedAttachments = otherAttachments.filter((a) => a.type !== 'audio');
 
-    // Sent in both languages together, since there's often no text to
-    // detect a language from (e.g. a bare story mention with no caption).
+  if (!hasAttachments && voiceNoteAttachments.length > 0) {
+    if (pendingMediaBatches.has(senderId)) await flushMediaBatch(senderId);
+    const askToTypeText = 'عذراً، ما نقدر نستمع للرسائل الصوتية لأن هذا بوت ذكاء اصطناعي. ممكن تكتبولنا اللي حابين تحكوه بالنص لو سمحتوا؟\n\nSorry, we are not able to listen to voice notes as this is an AI chatbot. Could you please write down what you would like to say instead?';
+    await sendInstagramReply(senderId, askToTypeText);
+    console.log(`🎙️ Voice note from ${senderId} — asked them to type instead, bot stays active.`);
+    return;
+  }
+
+  // Story mentions, post/reel shares, or any other attachment type we
+  // genuinely cannot process (Meta labels these with types like
+  // story_mention, share, ig_post, reel, ig_reel — none of which are
+  // image/video, so they land here rather than being treated as real
+  // photos/videos; there is nothing to "type instead" for a story
+  // mention, unlike a voice note): goes to a volunteer with a general
+  // bilingual acknowledgment.
+  if (!hasAttachments && trulyUnsupportedAttachments.length > 0) {
+    if (pendingMediaBatches.has(senderId)) await flushMediaBatch(senderId);
     const ackText = 'شكراً لرسالتكم سيتم الرد عليكم من قبل احد متطوعين تبني بأسرع وقت ممكن\n\nThank you for your message. One of tabanni\'s volunteers will get back to you as soon as possible.';
     await sendInstagramReply(senderId, ackText);
-
     await setManualPause(senderId, true);
-    console.log(`🎙️ Voice note/unsupported attachment from ${senderId} — bot paused, team alerted.`);
-
+    console.log(`📎 Unsupported attachment from ${senderId} — bot paused, team alerted.`);
     const profile = await getInstagramUserProfile(senderId);
     const displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
-
     await queueTelegramCall(async () => {
       await sendTelegramNotificationWithButton(
-        `🎙️ tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nSent a voice note or unsupported file type${userText ? `\nMessage text: "${userText}"` : ''}\n\nOpen Instagram DMs to listen and reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`,
+        `📎 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nSent a story mention, share, or other unsupported content${userText ? `\nMessage text: "${userText}"` : ''}\n\nOpen Instagram DMs to review and reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`,
         'toggle_handled',
         '☐ Not handled yet'
       );
@@ -545,7 +552,12 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
       await sendTelegramSpacer();
     });
   } else if (intakeSummary) {
-    console.log(`🆕 Adoption intake ready for ${senderId} — generating story image.`);
+    // An intake is now treated as a full handoff case too: pause for 24
+    // hours the same way HANDOFF/FLAG do, since the team needs to review
+    // and post the story card themselves. Everything else about the
+    // intake (photos, story card, checkbox) stays exactly the same.
+    await setManualPause(senderId, true);
+    console.log(`🆕 Adoption intake ready for ${senderId} — generating story image. Bot paused for 24h.`);
 
     const displayName = await getDisplayName();
 
@@ -601,13 +613,7 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
       await sendTelegramSpacer();
     });
 
-    // The intake task itself is done — your team's Telegram record now has
-    // everything needed (text summary + story image + checkbox to track
-    // posting), so there's nothing further for the TEAM to do on this
-    // conversation unless they choose to. But the bot stays fully active
-    // and keeps replying normally if the person messages again (e.g. to
-    // say thanks, or ask something else) — it is not paused.
-    console.log(`✅ Adoption intake fully sent to Telegram for ${senderId} — bot remains active for this conversation.`);
+    console.log(`✅ Adoption intake fully sent to Telegram for ${senderId} — bot paused 24h.`);
   } else if (nursingInfo) {
     console.log(`🍼 Nursing mother case flagged for ${senderId}.`);
 

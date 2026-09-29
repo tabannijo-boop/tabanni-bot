@@ -34,6 +34,14 @@ const HANDOFF_PAUSE_EXPIRY_MS = 24 * 60 * 60 * 1000;
 // 7 days is far longer than any real back-and-forth should take.
 const STATE_TTL_SECONDS = 7 * 24 * 60 * 60;
 
+// How long a conversation can go quiet before the next message should get
+// the full opening/disclosure message again (the "you are talking to
+// tabanni's AI agent" note). Deliberately its own explicit value, separate
+// from STATE_TTL_SECONDS above, so the two can be tuned independently —
+// one controls how long we remember the conversation at all, this one
+// controls when a returning person is treated as "starting fresh" again.
+const GREETING_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
+
 // How long we remember a bot-sent message ID, to recognize its own echo
 // (see wasSentByBot below). Only needs to cover the few seconds it takes
 // Instagram to echo a message back.
@@ -49,7 +57,7 @@ function echoKey(messageId) {
 async function getConvo(userId) {
   const stored = await redis.get(convoKey(userId));
   if (stored && typeof stored === 'object') return stored;
-  return { pausedUntil: null, manualPauseAt: null, history: [], photoUrls: [] };
+  return { pausedUntil: null, manualPauseAt: null, history: [], photoUrls: [], lastMessageAt: null };
 }
 
 async function saveConvo(userId, convo) {
@@ -153,6 +161,23 @@ async function claimIncomingMessage(messageId) {
   return result !== null; // non-null means we successfully claimed it (first time seeing it)
 }
 
+// --- Greeting refresh -----------------------------------------------------
+// Call once per incoming turn, before generating a reply. Returns true if
+// this is either a brand new conversation, or the person has been silent
+// for 7+ days since their last message — in both cases the reply should
+// include the full opening/disclosure message again, since Claude only
+// sees the conversation TEXT, not real timestamps, and has no way to know
+// time has passed otherwise. Also updates the stored last-message time to
+// now, regardless of the result.
+async function checkNeedsGreetingRefresh(userId) {
+  const convo = await getConvo(userId);
+  const previous = convo.lastMessageAt;
+  const needsRefresh = !previous || (Date.now() - previous >= GREETING_REFRESH_MS);
+  convo.lastMessageAt = Date.now();
+  await saveConvo(userId, convo);
+  return needsRefresh;
+}
+
 module.exports = {
   isPaused,
   pauseAfterHumanReply,
@@ -165,4 +190,5 @@ module.exports = {
   addPhotoUrl,
   getPhotoUrls,
   claimIncomingMessage,
+  checkNeedsGreetingRefresh,
 };

@@ -12,6 +12,7 @@ const {
   addPhotoUrl,
   getPhotoUrls,
   claimIncomingMessage,
+  checkNeedsGreetingRefresh,
 } = require('./conversationState');
 const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, queueTelegramCall, sendTelegramAlertPhoto, sendTelegramNotificationWithButton } = require('./apis');
 const { generateStoryImage } = require('./storyTemplate');
@@ -144,8 +145,13 @@ function detectLanguage(text) {
 // reply came back in the wrong language. This is the real fix for language
 // mismatches — a prompt instruction alone was not reliable enough on its
 // own, this actually verifies the output before it gets sent.
-async function getVerifiedClaudeReply(history) {
-  const reply = await getClaudeReply(history);
+//
+// baseNote (optional): extra context included in EVERY call for this turn,
+// not just a retry — used for the 7-day greeting refresh below, so Claude
+// knows to treat this as a fresh conversation start even though the stored
+// history might still contain older messages.
+async function getVerifiedClaudeReply(history, baseNote = '') {
+  const reply = await getClaudeReply(history, baseNote);
 
   const lastUserMsg = [...history].reverse().find((m) => m.role === 'user');
   const expectedLang = detectLanguage(lastUserMsg?.content);
@@ -155,7 +161,8 @@ async function getVerifiedClaudeReply(history) {
     const languageNames = { ar: 'Arabic', en: 'English' };
     console.log(`⚠️ Language mismatch detected (expected ${languageNames[expectedLang]}, got ${languageNames[actualLang]}) — retrying once.`);
     const correctionNote = `CRITICAL CORRECTION: your previous reply was in the wrong language. The person's most recent message was in ${languageNames[expectedLang]}. Rewrite your ENTIRE reply in ${languageNames[expectedLang]} only, keeping the same meaning and keeping any [[MARKER]] you used exactly as it was. Do not mix languages.`;
-    const retryReply = await getClaudeReply(history, correctionNote);
+    const combinedNote = baseNote ? `${baseNote}\n\n${correctionNote}` : correctionNote;
+    const retryReply = await getClaudeReply(history, combinedNote);
     const retryLang = detectLanguage(extractOutgoingText(retryReply));
     if (retryLang === expectedLang) {
       console.log(`✅ Language corrected on retry.`);
@@ -270,7 +277,7 @@ app.get('/webhook', (req, res) => {
 
 // ---------------------------------------------------------------------------
 // 2) Webhook events — every incoming DM (and every message YOU send from the
-//    Instagram app itself, delivered back as an "") arrives here.
+//    Instagram app itself, delivered back as an "echo") arrives here.
 // ---------------------------------------------------------------------------
 app.post('/webhook', async (req, res) => {
   // Always respond fast so Meta doesn't retry/duplicate the event.
@@ -315,13 +322,13 @@ async function handleMessagingEvent(event) {
     return;
   }
 
-  // --- Human handoff: is this message an "" of something a HUMAN sent ---
-  // manually from the Instagram app? Instagram es back EVERY message sent
+  // --- Human handoff: is this message an "echo" of something a HUMAN sent ---
+  // manually from the Instagram app? Instagram echoes back EVERY message sent
   // from your account, including the bot's own replies — so we check whether
   // this specific message ID is one the bot just sent itself. If so, ignore
   // it silently. If it's an echo the bot doesn't recognize, a human really
   // did send it manually, so pause the bot on this conversation.
-   if (message.is_echo) {
+  if (message.is_echo) {
     if (await wasSentByBot(message.mid)) return;
     await pauseAfterHumanReply(senderId);
     console.log(`Detected manual reply to ${senderId} — pausing bot for this conversation.`);
@@ -354,7 +361,7 @@ async function handleMessagingEvent(event) {
     : [];
   const hasAttachments = mediaAttachments.length > 0;
 
-   // Voice notes specifically: the bot cannot transcribe audio, but this is
+  // Voice notes specifically: the bot cannot transcribe audio, but this is
   // fully self-resolvable by just asking the person to type instead, so no
   // human needs to get involved. No pause, no Telegram alert, bot stays
   // fully active and ready for their next (typed) message.
@@ -494,7 +501,18 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     return;
   }
 
-  const reply = await getVerifiedClaudeReply(await getHistory(senderId));
+  // If this is a brand new conversation, or the person has been silent for
+  // 7+ days, treat this reply as worth the full opening/disclosure message
+  // again (the "you are talking to tabanni's AI agent" note), even though
+  // the stored history might still technically contain older messages.
+  // Claude only sees the conversation TEXT, not real timestamps, so it has
+  // no way to know time has passed unless told explicitly here.
+  const needsGreetingRefresh = await checkNeedsGreetingRefresh(senderId);
+  const greetingNote = needsGreetingRefresh
+    ? 'CONTEXT NOTE: the person has either never messaged before, or has been silent for 7 or more days since their last message. Treat this reply as a fresh conversation start: include the full opening/disclosure message pattern (mentioning this is tabanni\'s AI agent, plus the trial-phase note), the same as you would for a brand new conversation, even if the message history below shows earlier messages.'
+    : '';
+
+  const reply = await getVerifiedClaudeReply(await getHistory(senderId), greetingNote);
   await addAssistantMessage(senderId, reply);
 
   // --- Human handoff: did Claude flag this as something it can't safely ---

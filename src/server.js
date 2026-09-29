@@ -339,13 +339,10 @@ async function handleMessagingEvent(event) {
     : [];
   const hasAttachments = mediaAttachments.length > 0;
 
-  // Voice notes specifically: the bot cannot transcribe audio, but this is
+   // Voice notes specifically: the bot cannot transcribe audio, but this is
   // fully self-resolvable by just asking the person to type instead, so no
   // human needs to get involved. No pause, no Telegram alert, bot stays
   // fully active and ready for their next (typed) message.
-  const voiceNoteAttachments = otherAttachments.filter((a) => a.type === 'audio');
-  const trulyUnsupportedAttachments = otherAttachments.filter((a) => a.type !== 'audio');
-
   const voiceNoteAttachments = otherAttachments.filter((a) => a.type === 'audio');
   // "fallback" (or anything else with no usable payload URL) is what Meta
   // sends for an unsupported share it could not represent properly — this

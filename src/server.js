@@ -270,7 +270,7 @@ app.get('/webhook', (req, res) => {
 
 // ---------------------------------------------------------------------------
 // 2) Webhook events — every incoming DM (and every message YOU send from the
-//    Instagram app itself, delivered back as an "echo") arrives here.
+//    Instagram app itself, delivered back as an "") arrives here.
 // ---------------------------------------------------------------------------
 app.post('/webhook', async (req, res) => {
   // Always respond fast so Meta doesn't retry/duplicate the event.
@@ -315,19 +315,34 @@ async function handleMessagingEvent(event) {
     return;
   }
 
-  // --- Human handoff: is this message an "echo" of something a HUMAN sent ---
-  // manually from the Instagram app? Instagram echoes back EVERY message sent
+  // --- Human handoff: is this message an "" of something a HUMAN sent ---
+  // manually from the Instagram app? Instagram es back EVERY message sent
   // from your account, including the bot's own replies — so we check whether
   // this specific message ID is one the bot just sent itself. If so, ignore
   // it silently. If it's an echo the bot doesn't recognize, a human really
   // did send it manually, so pause the bot on this conversation.
-  if (message.is_echo) {
-    if (await wasSentByBot(message.mid)) {
-      return; // this is just our own reply bouncing back — not a human reply
-    }
+   if (message.is_echo) {
+    if (await wasSentByBot(message.mid)) return;
     await pauseAfterHumanReply(senderId);
     console.log(`Detected manual reply to ${senderId} — pausing bot for this conversation.`);
     return;
+  }
+
+  // A bare emoji "quick reaction" tapped directly on one of tabanni's
+  // Stories arrives as a message with reply_to.story set, and text that
+  // is just the emoji itself, no real content. This is intentionally
+  // suppressed entirely, no reply, no pause, no Telegram alert, nothing.
+  // A genuine typed reply to a story (someone actually asking a real
+  // question, e.g. "is this dog still available?") also carries
+  // reply_to.story, but has real language content, so it is NOT
+  // suppressed, it flows through to Claude normally like any message.
+  if (message.reply_to?.story) {
+    const hasRealTextContent = !!(message.text && /[A-Za-z\u0600-\u06FF]/.test(message.text));
+    const hasRealAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
+    if (!hasRealTextContent && !hasRealAttachments) {
+      console.log(`Story reaction (no real content) from ${senderId} — no action taken.`);
+      return;
+    }
   }
 
   const userText = message.text;

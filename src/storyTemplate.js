@@ -6,7 +6,7 @@
 // Layout matches tabanni's reference template: a 2x2 photo collage across
 // the top, a light paper-textured background, a rounded "story" box with
 // the pet's info, a hand-lettered "CONTACT INFO:" label, and a rounded
-// contact box with the phone number at the very bottom.
+// contact box with the phone number (or fallback text) at the very bottom.
 //
 // Uses sharp for compositing (fast, well-supported on Render) and embeds
 // real font files + tabanni's real logo as base64 in an SVG overlay, so it
@@ -60,7 +60,8 @@ function escapeXml(str) {
     .replace(/'/g, '&apos;');
 }
 
-// Very rough line-wrapping for the story caption.
+// Very rough line-wrapping for the story caption (and now also the contact
+// box text, see fitContactText below).
 function wrapText(text, maxCharsPerLine, maxLines) {
   const words = String(text || '').split(/\s+/).filter(Boolean);
   const lines = [];
@@ -80,6 +81,33 @@ function wrapText(text, maxCharsPerLine, maxLines) {
     lines[lines.length - 1] = lines[lines.length - 1].replace(/\s*\S*$/, '') + '…';
   }
   return lines;
+}
+
+// The contact box used to always render info.phone at one fixed large font
+// size, on one line, no wrapping — fine for a real phone number, but real
+// phone numbers are no longer guaranteed here: a declined phone now comes
+// through as fallback text (e.g. "Not shared, contact via Instagram"),
+// which is far too long for the box at that size and would visibly
+// overflow off the card. This picks the largest of a few font-size/line
+// presets that plausibly fits the given text within the box, wrapping to a
+// second line if needed, so short values (a real phone number, a short
+// username) stay big and clean, and longer fallback text shrinks and wraps
+// instead of overflowing.
+function fitContactText(text) {
+  const clean = String(text || '').trim();
+  const attempts = [
+    { fontSize: 42, maxCharsPerLine: 14, maxLines: 1 },
+    { fontSize: 32, maxCharsPerLine: 20, maxLines: 1 },
+    { fontSize: 26, maxCharsPerLine: 26, maxLines: 2 },
+    { fontSize: 22, maxCharsPerLine: 34, maxLines: 2 },
+  ];
+  for (const attempt of attempts) {
+    if (clean.length <= attempt.maxCharsPerLine * attempt.maxLines) {
+      return { ...attempt, lines: wrapText(clean, attempt.maxCharsPerLine, attempt.maxLines) };
+    }
+  }
+  const last = attempts[attempts.length - 1];
+  return { ...last, lines: wrapText(clean, last.maxCharsPerLine, last.maxLines) };
 }
 
 async function fetchAndPrepPhoto(url, cellW, cellH) {
@@ -148,7 +176,7 @@ function paperTextureSvg(w, h) {
  * @param {string} info.gender
  * @param {string} info.vaccination
  * @param {string} info.story - the short condensed caption (1-2 lines worth)
- * @param {string} info.phone
+ * @param {string} info.phone - a real phone number, OR fallback text if declined
  * @returns {Promise<Buffer>} PNG image buffer
  */
 async function generateStoryImage(info) {
@@ -199,6 +227,22 @@ async function generateStoryImage(info) {
 
   const contactLabelText = 'CONTACT INFO:';
 
+  // Contact box text now adapts its font size and wraps to a second line
+  // when needed (see fitContactText above), instead of always rendering
+  // at one fixed large size on one line. A real phone number still gets
+  // the original big, clean single-line look; longer fallback text (e.g.
+  // a declined phone, or a username) shrinks and wraps to fit inside the
+  // box instead of overflowing off the card.
+  const contactFit = fitContactText(info.phone);
+  const contactIsAr = isArabicText(info.phone);
+  const contactFontFamily = contactIsAr ? 'NotoSansArabic' : 'NotoSans';
+  const contactLineHeight = contactFit.fontSize + 10;
+  const contactBlockH = contactFit.lines.length * contactLineHeight;
+  const contactStartY = CONTACT_BOX.y + CONTACT_BOX.h / 2 - contactBlockH / 2 + contactFit.fontSize * 0.75;
+  const contactTspans = contactFit.lines
+    .map((line, i) => `<tspan x="${CANVAS_W / 2}" dy="${i === 0 ? 0 : contactLineHeight}">${escapeXml(line)}</tspan>`)
+    .join('');
+
   const overlaySvg = `
     <svg width="${CANVAS_W}" height="${CANVAS_H}" xmlns="http://www.w3.org/2000/svg">
       <defs>
@@ -224,9 +268,9 @@ async function generateStoryImage(info) {
       <!-- "CONTACT INFO:" label -->
       <text x="${CANVAS_W / 2}" y="${CONTACT_LABEL_Y}" font-family="${fontFamily}" font-size="34" font-weight="500" fill="${BRAND_NAVY}" text-anchor="middle" letter-spacing="1">${contactLabelText}</text>
 
-      <!-- Contact box: phone number -->
+      <!-- Contact box: phone number, or fallback text if declined -->
       <rect x="${CONTACT_BOX.x}" y="${CONTACT_BOX.y}" width="${CONTACT_BOX.w}" height="${CONTACT_BOX.h}" rx="${CONTACT_BOX.r}" fill="${BOX_FILL}" />
-      <text x="${CANVAS_W / 2}" y="${CONTACT_BOX.y + CONTACT_BOX.h / 2 + 14}" font-family="${fontFamily}" font-size="42" fill="${BRAND_NAVY}" text-anchor="middle">${escapeXml(info.phone)}</text>
+      <text x="${CANVAS_W / 2}" y="${contactStartY}" font-family="${contactFontFamily}" font-size="${contactFit.fontSize}" fill="${BRAND_NAVY}" text-anchor="middle">${contactTspans}</text>
     </svg>
   `;
 

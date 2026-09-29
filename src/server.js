@@ -346,6 +346,16 @@ async function handleMessagingEvent(event) {
   const voiceNoteAttachments = otherAttachments.filter((a) => a.type === 'audio');
   const trulyUnsupportedAttachments = otherAttachments.filter((a) => a.type !== 'audio');
 
+  const voiceNoteAttachments = otherAttachments.filter((a) => a.type === 'audio');
+  // "fallback" (or anything else with no usable payload URL) is what Meta
+  // sends for an unsupported share it could not represent properly — this
+  // includes cases like a failed contact/phone-number share. There is
+  // nothing here worth pausing the conversation or alerting the team
+  // over, so it is handled the same gentle way as a voice note: just ask
+  // the person to type it normally.
+  const emptyFallbackAttachments = otherAttachments.filter((a) => a.type !== 'audio' && !a?.payload?.url);
+  const trulyUnsupportedAttachments = otherAttachments.filter((a) => a.type !== 'audio' && a?.payload?.url);
+
   if (!hasAttachments && voiceNoteAttachments.length > 0) {
     if (pendingMediaBatches.has(senderId)) await flushMediaBatch(senderId);
     const askToTypeText = 'عذراً، ما نقدر نستمع للرسائل الصوتية لأن هذا بوت ذكاء اصطناعي. ممكن تكتبولنا اللي حابين تحكوه بالنص لو سمحتوا؟\n\nSorry, we are not able to listen to voice notes as this is an AI chatbot. Could you please write down what you would like to say instead?';
@@ -354,13 +364,17 @@ async function handleMessagingEvent(event) {
     return;
   }
 
+  if (!hasAttachments && emptyFallbackAttachments.length > 0) {
+    if (pendingMediaBatches.has(senderId)) await flushMediaBatch(senderId);
+    const askToTypeText = 'عذراً، ما قدرنا نستقبل هاد النوع من الرسائل. ممكن تكتبولنا اللي حابين تحكوه بالنص لو سمحتوا؟\n\nSorry, we were not able to receive that type of message. Could you please write it out as text instead?';
+    await sendInstagramReply(senderId, askToTypeText);
+    console.log(`📎 Empty/fallback attachment (e.g. failed share) from ${senderId} — asked them to type instead, bot stays active.`);
+    return;
+  }
+
   // Story mentions, post/reel shares, or any other attachment type we
-  // genuinely cannot process (Meta labels these with types like
-  // story_mention, share, ig_post, reel, ig_reel — none of which are
-  // image/video, so they land here rather than being treated as real
-  // photos/videos; there is nothing to "type instead" for a story
-  // mention, unlike a voice note): goes to a volunteer with a general
-  // bilingual acknowledgment.
+  // genuinely cannot process (there is nothing to "type instead" for a
+  // story mention): goes to a volunteer with a general acknowledgment.
   if (!hasAttachments && trulyUnsupportedAttachments.length > 0) {
     if (pendingMediaBatches.has(senderId)) await flushMediaBatch(senderId);
     const ackText = 'شكراً لرسالتكم سيتم الرد عليكم من قبل احد متطوعين تبني بأسرع وقت ممكن\n\nThank you for your message. One of tabanni\'s volunteers will get back to you as soon as possible.';

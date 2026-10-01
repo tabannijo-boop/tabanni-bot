@@ -87,11 +87,6 @@ async function getClaudeReply(history, extraSystemNote = '') {
 
   const data = await res.json();
 
-  // Log cache performance so it's easy to confirm caching is actually
-  // working in Render's logs, not just trusted blindly. cache_read means
-  // this call reused the cached system prompt (cheap); cache_creation means
-  // this call wrote a fresh cache entry (slightly more than uncached, but
-  // sets up cheap reads for the next few minutes of this conversation).
   const usage = data.usage;
   if (usage) {
     const cacheRead = usage.cache_read_input_tokens || 0;
@@ -110,10 +105,6 @@ async function getClaudeReply(history, extraSystemNote = '') {
     "Hello! Thank you for reaching out — a team member will follow up with you shortly. 🐾";
 }
 
-// Pings your team on Telegram when a conversation gets flagged for a human
-// (someone asked for Sereen/a human, or the bot hit something it can't
-// answer). Silently does nothing if the env vars aren't set, so this is
-// safe to leave in even before you've set up the Telegram bot.
 async function sendTelegramNotification(text) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -140,9 +131,6 @@ async function sendTelegramNotification(text) {
   }
 }
 
-// Looks up the sender's Instagram username/name from their IGSID, so
-// notifications are readable instead of just showing a numeric ID.
-// Returns null if the lookup fails — callers should fall back gracefully.
 async function getInstagramUserProfile(psid) {
   const url = `https://graph.instagram.com/v21.0/${psid}?fields=name,username&access_token=${process.env.PAGE_ACCESS_TOKEN}`;
   try {
@@ -160,11 +148,6 @@ async function getInstagramUserProfile(psid) {
   }
 }
 
-// Forwards a photo the person sent on Instagram straight to your Telegram
-// group, so your team has adoption-story photos, injured-animal photos,
-// lost/found photos, etc. all in one place — ready to grab and edit/post,
-// without digging through Instagram DMs. Does not edit or post anything
-// itself; that's still a human's call.
 async function sendTelegramPhoto(caption, photoUrl) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -190,7 +173,6 @@ async function sendTelegramPhoto(caption, photoUrl) {
   }
 }
 
-// Same idea, for videos.
 async function sendTelegramVideo(caption, videoUrl) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -216,20 +198,10 @@ async function sendTelegramVideo(caption, videoUrl) {
   }
 }
 
-// Sends a short visual divider message to Telegram, so consecutive alerts
-// (handoffs, flags, intakes) are easy to tell apart at a glance in a busy
-// group chat instead of blurring together.
 async function sendTelegramSpacer() {
   await sendTelegramNotification('⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯');
 }
 
-// Sends the finished, generated story image to Telegram as a document (not
-// a compressed photo) so your team gets the full-quality PNG, ready to save
-// and post directly to Instagram Stories. Includes a tappable checkbox
-// button so the team can mark it "posted" once it's actually on the story —
-// tapping it edits this same message, no separate tracking needed.
-// Returns { chatId, messageId } on success (needed to edit it later), or
-// null on failure.
 async function sendTelegramStoryImage(caption, imageBuffer, filename = 'tabanni_story.png') {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -261,11 +233,6 @@ async function sendTelegramStoryImage(caption, imageBuffer, filename = 'tabanni_
   }
 }
 
-// Sends multiple photos/videos to Telegram as one grouped album (instead of
-// separate messages), so a batch of adoption-story media arrives together
-// with one caption instead of flooding the chat. Telegram requires at least
-// 2 items per group and caps each group at 10, so this chunks larger
-// batches and falls back to a single photo/video send for a lone item.
 async function sendTelegramMediaGroup(caption, items) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -317,9 +284,6 @@ async function sendTelegramMediaGroup(caption, items) {
   return allOk;
 }
 
-// Called when someone taps the "posted / not posted" checkbox button on a
-// story image message — edits that exact message's button to reflect the
-// new state.
 async function editTelegramMessageReplyMarkup(chatId, messageId, replyMarkup) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) return false;
@@ -341,8 +305,6 @@ async function editTelegramMessageReplyMarkup(chatId, messageId, replyMarkup) {
   }
 }
 
-// Required by Telegram whenever a button is tapped — clears the little
-// loading spinner on the button, optionally shows a brief toast.
 async function answerTelegramCallbackQuery(callbackQueryId, text = '') {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) return false;
@@ -360,8 +322,6 @@ async function answerTelegramCallbackQuery(callbackQueryId, text = '') {
   }
 }
 
-// One-time setup call — tells Telegram where to send button-tap events.
-// See README for how/when to run this.
 async function setTelegramWebhook(webhookUrl) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) return false;
@@ -381,9 +341,6 @@ async function setTelegramWebhook(webhookUrl) {
   }
 }
 
-// Sends a photo alert to Telegram (e.g. a nursing-mother case) with its
-// own tappable checkbox, same pattern as the story-image checkbox but for
-// a plain photo instead of a generated composite.
 async function sendTelegramAlertPhoto(caption, photoUrl, callbackData, offLabel) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -416,9 +373,6 @@ async function sendTelegramAlertPhoto(caption, photoUrl, callbackData, offLabel)
   }
 }
 
-// Sends a plain text alert to Telegram with its own tappable checkbox, so
-// handoffs, flags, and other text-only alerts can be tracked as "done" the
-// same way the story-image and nursing-mom photo alerts already are.
 async function sendTelegramNotificationWithButton(text, callbackData, offLabel) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;

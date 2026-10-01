@@ -18,7 +18,8 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-const AUTO_PAUSE_MINUTES = parseInt(process.env.AUTO_PAUSE_MINUTES || '60', 10);
+// (AUTO_PAUSE_MINUTES removed: pauseAfterHumanReply now uses the same
+// 24-hour window as every other pause case, see HANDOFF_PAUSE_EXPIRY_MS.)
 const MAX_HISTORY_MESSAGES = 12; // keep the last N turns so replies stay short & cheap
 const MAX_TRACKED_PHOTOS = 10;
 
@@ -79,7 +80,10 @@ async function isPaused(userId) {
 
 async function pauseAfterHumanReply(userId) {
   const convo = await getConvo(userId);
-  convo.pausedUntil = Date.now() + AUTO_PAUSE_MINUTES * 60 * 1000;
+  // 24 hours, same as every other pause case (handoff, flag, intake,
+  // unsupported attachment) — any team member replying manually inside a
+  // conversation steps the bot out for a full day, not just an hour.
+  convo.pausedUntil = Date.now() + HANDOFF_PAUSE_EXPIRY_MS;
   await saveConvo(userId, convo);
 }
 

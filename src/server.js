@@ -57,16 +57,21 @@ async function sendInstagramReply(senderId, text) {
 // The [[INTAKE]] marker is different from [[HANDOFF]] and [[FLAG]]: it wraps
 // a structured summary block, followed by the actual reply to send the
 // person. Format: [[INTAKE]]...summary...[[/INTAKE]]reply text here
-// Returns null if the reply doesn't start with [[INTAKE]] or is malformed.
-const INTAKE_MARKER_START = '[[INTAKE]]';
-const INTAKE_MARKER_END = '[[/INTAKE]]';
-function parseIntakeMarker(reply) {
-  if (!reply.startsWith(INTAKE_MARKER_START)) return null;
-  const endIdx = reply.indexOf(INTAKE_MARKER_END);
-  if (endIdx === -1) return null;
-  const summary = reply.slice(INTAKE_MARKER_START.length, endIdx).trim();
-  const outgoingText = reply.slice(endIdx + INTAKE_MARKER_END.length).trim();
-  return { summary, outgoingText };
+// Finds every [[INTAKE]]...[[/INTAKE]] block in a reply (there can be more
+// than one, when someone is surrendering multiple pets together and each
+// animal gets its own summary block), and returns the outgoing text with
+// all of them stripped out. Returns null if there are no intake blocks at
+// all. A single-pet intake is just the length-1 case of this.
+function parseAllIntakeMarkers(reply) {
+  const regex = /\[\[INTAKE\]\]([\s\S]*?)\[\[\/INTAKE\]\]/g;
+  const summaries = [];
+  let match;
+  while ((match = regex.exec(reply)) !== null) {
+    summaries.push(match[1].trim());
+  }
+  if (summaries.length === 0) return null;
+  const outgoingText = reply.replace(regex, '').trim();
+  return { summaries, outgoingText };
 }
 
 // Same idea for the [[NURSING]] marker — a structured phone-number block
@@ -86,16 +91,18 @@ function parseNursingMarker(reply) {
 }
 
 // Pulls the labeled fields (Name, Type, Age, Gender, Vaccination status,
-// Phone number, Story) out of the [[INTAKE]] summary block, so they can be
-// passed to the story image generator as structured data instead of raw
-// text. Matches the format defined in knowledge.js — if that format ever
-// changes, update the labels here to match.
+// Phone number, Story, Photo count) out of a single [[INTAKE]] summary
+// block, so they can be passed to the story image generator as structured
+// data instead of raw text. Matches the format defined in knowledge.js —
+// if that format ever changes, update the labels here to match.
 function parseIntakeFields(summary) {
   const getField = (label) => {
     const re = new RegExp(`${label}\\s*:\\s*(.+)`, 'i');
     const match = summary.match(re);
     return match ? match[1].trim() : '';
   };
+  const photoCountRaw = getField('Photo count');
+  const photoCount = photoCountRaw ? parseInt(photoCountRaw, 10) : null;
   return {
     name: getField('Name') || getField('🐾 Name'),
     animalType: getField('Type'),
@@ -104,6 +111,10 @@ function parseIntakeFields(summary) {
     vaccination: getField('Vaccination status'),
     phone: getField('Phone number'),
     story: getField('Story'),
+    // How many of the pooled photos belong to this specific pet, in a
+    // multi-pet intake. null when not present (single-pet intakes never
+    // need this, they just take the most recent photos directly).
+    photoCount: Number.isFinite(photoCount) ? photoCount : null,
   };
 }
 
@@ -122,7 +133,7 @@ function parseIntakeFields(summary) {
 // rather than requiring the marker to be a strict prefix, since the model
 // can occasionally place it elsewhere in the reply.
 function extractOutgoingText(reply) {
-  const intake = parseIntakeMarker(reply);
+  const intake = parseAllIntakeMarkers(reply);
   if (intake) return intake.outgoingText;
   const nursing = parseNursingMarker(reply);
   if (nursing) return nursing.outgoingText;
@@ -192,15 +203,18 @@ app.post('/api/test-chat', async (req, res) => {
     let intake = false;
     const lastUserMsg = [...history].reverse().find(m => m.role === 'user');
 
-    const intakeParsed = parseIntakeMarker(reply);
+    const intakeParsed = parseAllIntakeMarkers(reply);
     if (intakeParsed) {
       intake = true;
       outgoingText = intakeParsed.outgoingText;
-      await sendTelegramNotificationWithButton(
-        `🧪🐾🆕 [TEST PAGE] New adoption intake ready to post!\n\n${intakeParsed.summary}\n\nThis came from the /test.html team test page, not real Instagram.`,
-        'toggle_handled',
-        '☐ Not handled yet'
-      );
+      for (let i = 0; i < intakeParsed.summaries.length; i++) {
+        const petLabel = intakeParsed.summaries.length > 1 ? ` (pet ${i + 1} of ${intakeParsed.summaries.length})` : '';
+        await sendTelegramNotificationWithButton(
+          `🧪🐾🆕 [TEST PAGE] New adoption intake ready to post!${petLabel}\n\n${intakeParsed.summaries[i]}\n\nThis came from the /test.html team test page, not real Instagram.`,
+          'toggle_handled',
+          '☐ Not handled yet'
+        );
+      }
       await sendTelegramSpacer();
     } else if (reply.includes(HANDOFF_MARKER)) {
       handoff = true;
@@ -530,13 +544,13 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   let outgoingText = reply;
   let needsHandoff = false;
   let needsFlag = false;
-  let intakeSummary = null;
+  let intakeSummaries = null; // array, one entry per pet
   let nursingInfo = null;
 
-  const intakeParsed = parseIntakeMarker(reply);
+  const intakeParsed = parseAllIntakeMarkers(reply);
   const nursingParsed = parseNursingMarker(reply);
   if (intakeParsed) {
-    intakeSummary = intakeParsed.summary;
+    intakeSummaries = intakeParsed.summaries;
     outgoingText = intakeParsed.outgoingText;
   } else if (nursingParsed) {
     nursingInfo = nursingParsed;
@@ -595,69 +609,89 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
       );
       await sendTelegramSpacer();
     });
-  } else if (intakeSummary) {
+  } else if (intakeSummaries) {
     // An intake is now treated as a full handoff case too: pause for 24
     // hours the same way HANDOFF/FLAG do, since the team needs to review
-    // and post the story card themselves. Everything else about the
-    // intake (photos, story card, checkbox) stays exactly the same.
+    // and post the story card(s) themselves. Everything else about the
+    // intake (photos, story card, checkbox) stays exactly the same, now
+    // done once per pet when there is more than one in the same intake.
     await setManualPause(senderId, true);
-    console.log(`🆕 Adoption intake ready for ${senderId} — generating story image. Bot paused for 24h.`);
+    console.log(`🆕 Adoption intake ready for ${senderId} — ${intakeSummaries.length} pet(s). Bot paused for 24h.`);
 
     const displayName = await getDisplayName();
+    const allPhotoUrls = await getPhotoUrls(senderId);
 
-    // Do the slow part (fetching photos, compositing the image) BEFORE
-    // touching the Telegram queue, so this conversation's image generation
-    // time doesn't hold up other conversations' Telegram messages. Only
-    // the actual sends get queued as one atomic block below.
-    let imageBuffer = null;
-    let fields = null;
-    let imageGenError = null;
-    try {
-      fields = parseIntakeFields(intakeSummary);
-      const allPhotoUrls = await getPhotoUrls(senderId);
-      const photoUrls = allPhotoUrls.slice(-4); // most recent 4
-      if (photoUrls.length > 0 && fields.name) {
-        imageBuffer = await generateStoryImage({
-          photoUrls,
-          name: fields.name,
-          animalType: fields.animalType,
-          age: fields.age,
-          gender: fields.gender,
-          vaccination: fields.vaccination,
-          story: fields.story,
-          phone: fields.phone,
-        });
-      } else {
-        console.log(`Skipped story image for ${senderId}: missing photos or name.`);
+    // PHOTO ATTRIBUTION: with multiple pets in one intake, the pooled
+    // photos need to be split correctly per animal. Each pet's summary
+    // reports how many of the photos belong to it (see the "Photo count"
+    // field in knowledge.js's multi-pet instructions), and pets are
+    // collected and photographed in order, so consuming that many photos
+    // per pet, in sequence, from the front of the pool gives the right
+    // slice for each one. Falls back to giving a single pet all the
+    // pooled photos when there is only one pet (the normal case).
+    let photoCursor = 0;
+    const perPetResults = [];
+    for (let i = 0; i < intakeSummaries.length; i++) {
+      const summary = intakeSummaries[i];
+      let fields = null;
+      let imageBuffer = null;
+      let imageGenError = null;
+      try {
+        fields = parseIntakeFields(summary);
+        let photoUrls;
+        if (intakeSummaries.length === 1) {
+          photoUrls = allPhotoUrls.slice(-4); // single pet: most recent 4, as before
+        } else {
+          const count = fields.photoCount != null ? fields.photoCount : 0;
+          photoUrls = allPhotoUrls.slice(photoCursor, photoCursor + count);
+          photoCursor += count;
+        }
+        if (photoUrls.length > 0 && fields.name) {
+          imageBuffer = await generateStoryImage({
+            photoUrls,
+            name: fields.name,
+            animalType: fields.animalType,
+            age: fields.age,
+            gender: fields.gender,
+            vaccination: fields.vaccination,
+            story: fields.story,
+            phone: fields.phone,
+          });
+        } else {
+          console.log(`Skipped story image for ${senderId} (pet ${i + 1}/${intakeSummaries.length}): missing photos or name.`);
+        }
+      } catch (err) {
+        console.error(`Story image generation failed for pet ${i + 1}/${intakeSummaries.length}:`, err);
+        imageGenError = err;
       }
-    } catch (err) {
-      console.error('Story image generation failed:', err);
-      imageGenError = err;
+      perPetResults.push({ summary, fields, imageBuffer, imageGenError });
     }
 
     await queueTelegramCall(async () => {
-      await sendTelegramNotification(
-        `🐾🆕 New adoption intake ready to post!\n\nFrom: ${displayName}\n\n${intakeSummary}`
-      );
-
-      if (imageBuffer && fields) {
-        await sendTelegramStoryImage(
-          `🖼️ Ready-to-post story card for ${fields.name} — save and add to Instagram Stories. Tap the checkbox below once it is posted.`,
-          imageBuffer,
-          `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
+      for (let i = 0; i < perPetResults.length; i++) {
+        const { summary, fields, imageBuffer, imageGenError } = perPetResults[i];
+        const petLabel = perPetResults.length > 1 ? ` (pet ${i + 1} of ${perPetResults.length})` : '';
+        await sendTelegramNotification(
+          `🐾🆕 New adoption intake ready to post!${petLabel}\n\nFrom: ${displayName}\n\n${summary}`
         );
-      } else if (imageGenError) {
-        await sendTelegramNotificationWithButton(
-          '⚠️ Could not auto-generate the story image for the intake above — please build it manually this time.',
-          'toggle_handled',
-          '☐ Not handled yet'
-        );
+        if (imageBuffer && fields) {
+          await sendTelegramStoryImage(
+            `🖼️ Ready-to-post story card for ${fields.name}${petLabel} — save and add to Instagram Stories. Tap the checkbox below once it is posted.`,
+            imageBuffer,
+            `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
+          );
+        } else if (imageGenError) {
+          await sendTelegramNotificationWithButton(
+            `⚠️ Could not auto-generate the story image for the intake above${petLabel} — please build it manually this time.`,
+            'toggle_handled',
+            '☐ Not handled yet'
+          );
+        }
       }
-
       await sendTelegramSpacer();
     });
 
-    console.log(`✅ Adoption intake fully sent to Telegram for ${senderId} — bot paused 24h.`);
+    console.log(`✅ Adoption intake (${intakeSummaries.length} pet(s)) fully sent to Telegram for ${senderId} — bot paused 24h.`);
   } else if (nursingInfo) {
     console.log(`🍼 Nursing mother case flagged for ${senderId}.`);
 

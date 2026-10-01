@@ -59,7 +59,14 @@ async function getClaudeReply(history, extraSystemNote = '') {
     },
     body: JSON.stringify({
       model: 'claude-haiku-4-5',
-      max_tokens: 500,
+      // Raised from 500: a reply can now combine the opening/disclosure
+      // message with a full substantive answer in the same turn (e.g. a
+      // first-ever message that already contains a real question, or the
+      // 7-day greeting refresh), and Arabic text consumes meaningfully
+      // more tokens per character than English, so 500 was genuinely at
+      // risk of cutting a combined reply off mid-sentence before it
+      // finished. 1000 gives real headroom for that case.
+      max_tokens: 1000,
       // The system prompt (tabanni's whole knowledge base) is identical on
       // every single call and is by far the largest part of each request.
       // Marking it with cache_control lets Anthropic reuse it from cache

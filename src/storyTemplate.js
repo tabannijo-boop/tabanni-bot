@@ -8,10 +8,13 @@
 // the pet's info, a hand-lettered "CONTACT INFO:" label, and a rounded
 // contact box with the phone number (or fallback text) at the very bottom.
 //
-// Uses sharp for compositing (fast, well-supported on Render) and embeds
-// real font files + tabanni's real logo as base64 in an SVG overlay, so it
-// renders identically regardless of what fonts/assets happen to exist on
-// the host.
+// Uses sharp for compositing (fast, well-supported on Render).
+//
+// NOTE ON FONTS: the renderer (librsvg) ignores @font-face fonts embedded
+// in an SVG, so text is drawn in the server's default sans font, not in the
+// Noto Sans files below. They are still loaded so nothing else changes, but
+// text sizing in this file is measured against the font actually in use
+// rather than assumed.
 
 const sharp = require('sharp');
 const fs = require('fs');
@@ -33,6 +36,22 @@ const STORY_BOX = { x: 55, y: 1341, w: 970, h: 316, r: 32 };
 const CONTACT_LABEL_Y = 1725;
 const CONTACT_BOX = { x: 258, y: 1751, w: 564, h: 141, r: 32 };
 const PHOTO_AREA_H = 1300; // photo collage fills the top, down to just above the story box
+
+// Where the description sits inside the story box. It starts just under the
+// row of tags and may use the full width of the box and everything down to
+// a small bottom margin. (The old layout wrapped at ~46 characters and only
+// allowed two lines, which used about half the available space and cut
+// descriptions off mid-sentence.)
+const STORY_PAD_X = 40;
+const STORY_TEXT_TOP = STORY_BOX.y + 146;
+const STORY_TEXT_W = STORY_BOX.w - STORY_PAD_X * 2;
+const STORY_TEXT_MAX_H = STORY_BOX.h - 146 - 24;
+const STORY_FONT_SIZES = [28, 26, 24, 22]; // tried largest first, first one that fits wins
+
+// Photos closer than this (out of 64) in perceptual-hash distance are treated
+// as the same picture. Checked against real photos: near-identical shots of
+// the same pose scored 1-6, genuinely different photos scored 30+.
+const DUPLICATE_PHOTO_DISTANCE = 10;
 
 // Fonts and the logo are embedded once at module load, not per-request.
 const FONTS_DIR = path.join(__dirname, '..', 'fonts');
@@ -60,8 +79,18 @@ function escapeXml(str) {
     .replace(/'/g, '&apos;');
 }
 
-// Very rough line-wrapping for the story caption (and now also the contact
-// box text, see fitContactText below).
+// Emoji and pictograph characters have no glyphs in the server font and
+// would draw as empty boxes on the card, so they are removed from anything
+// printed on it. (The full text, emoji included, still goes to Telegram.)
+function cleanCardText(str) {
+  return String(str || '')
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu, '')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+}
+
+// Very rough line-wrapping, still used for the contact box text and as the
+// emergency fallback for the description (see renderStoryTextFallbackSvg).
 function wrapText(text, maxCharsPerLine, maxLines) {
   const words = String(text || '').split(/\s+/).filter(Boolean);
   const lines = [];
@@ -84,15 +113,11 @@ function wrapText(text, maxCharsPerLine, maxLines) {
 }
 
 // The contact box used to always render info.phone at one fixed large font
-// size, on one line, no wrapping — fine for a real phone number, but real
-// phone numbers are no longer guaranteed here: a declined phone now comes
-// through as fallback text (e.g. "Not shared, contact via Instagram"),
-// which is far too long for the box at that size and would visibly
-// overflow off the card. This picks the largest of a few font-size/line
-// presets that plausibly fits the given text within the box, wrapping to a
-// second line if needed, so short values (a real phone number, a short
-// username) stay big and clean, and longer fallback text shrinks and wraps
-// instead of overflowing.
+// size, on one line, no wrapping — fine for a real phone number, but a
+// declined phone now comes through as fallback text (e.g. "Not shared,
+// contact via Instagram"), which is far too long for the box at that size.
+// This picks the largest of a few font-size/line presets that plausibly
+// fits the text, wrapping to a second line if needed.
 function fitContactText(text) {
   const clean = String(text || '').trim();
   const attempts = [
@@ -110,13 +135,71 @@ function fitContactText(text) {
   return { ...last, lines: wrapText(clean, last.maxCharsPerLine, last.maxLines) };
 }
 
-async function fetchAndPrepPhoto(url, cellW, cellH) {
+// --- Photos: fetch, drop duplicates, pick the best 4 ----------------------
+
+async function fetchPhotoBuffer(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch photo: ${res.status}`);
-  const buffer = Buffer.from(await res.arrayBuffer());
-  return sharp(buffer)
-    .resize(cellW, cellH, { fit: 'cover', position: 'attention' })
-    .toBuffer();
+  return Buffer.from(await res.arrayBuffer());
+}
+
+// A "difference hash": shrink the photo to 9x8 greyscale and record whether
+// each pixel is brighter than its right-hand neighbour. Two copies of the
+// same picture (or near-identical frames of the same shot) end up with
+// almost the same 64 bits even if the files differ, which is what lets us
+// spot duplicates when the same photo is sent more than once.
+async function perceptualHash(buffer) {
+  const { data } = await sharp(buffer)
+    .rotate()
+    .grayscale()
+    .resize(9, 8, { fit: 'fill' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  let bits = '';
+  for (let y = 0; y < 8; y++) {
+    for (let x = 0; x < 8; x++) {
+      bits += data[y * 9 + x] > data[y * 9 + x + 1] ? '1' : '0';
+    }
+  }
+  return bits;
+}
+
+function hammingDistance(a, b) {
+  let d = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++;
+  return d;
+}
+
+// Fetches every candidate photo, then keeps up to maxPhotos DISTINCT ones.
+// Candidates are in the order they were sent (oldest first); when the same
+// picture appears more than once the most recent copy is the one kept, and
+// the result is returned in the original sending order.
+async function pickDistinctPhotos(photoUrls, maxPhotos = 4) {
+  const fetched = await Promise.all(
+    photoUrls.map(async (url) => {
+      try {
+        const buffer = await fetchPhotoBuffer(url);
+        const hash = await perceptualHash(buffer);
+        return { url, buffer, hash };
+      } catch (err) {
+        console.warn(`Story card: skipped a photo that could not be loaded (${err.message}).`);
+        return null;
+      }
+    })
+  );
+  const usable = fetched.filter(Boolean);
+
+  const kept = [];
+  for (let i = usable.length - 1; i >= 0 && kept.length < maxPhotos; i--) {
+    const candidate = usable[i];
+    const duplicateOf = kept.find((k) => hammingDistance(k.hash, candidate.hash) <= DUPLICATE_PHOTO_DISTANCE);
+    if (duplicateOf) {
+      console.log('Story card: skipped a duplicate photo.');
+      continue;
+    }
+    kept.push(candidate);
+  }
+  return kept.reverse();
 }
 
 // Builds the grid layout for 1-4 photos. Always aims for a 2x2 feel when
@@ -151,10 +234,76 @@ function buildGridLayout(count, areaW, areaH) {
   ];
 }
 
+// --- Description text: measured, not guessed ------------------------------
+
+// Cuts text down to at most maxChars, ending on a complete sentence when
+// there is one, so a long description is shortened cleanly instead of
+// stopping mid-sentence. Only if there is no sentence end to cut at does it
+// fall back to the last whole word plus an ellipsis.
+function truncateAtSentence(text, maxChars) {
+  const t = String(text || '').trim();
+  if (t.length <= maxChars) return t;
+  const slice = t.slice(0, maxChars);
+  let lastEnd = -1;
+  const re = /[.!?؟。](?=\s|$)/g;
+  let m;
+  while ((m = re.exec(slice)) !== null) lastEnd = m.index;
+  if (lastEnd >= maxChars * 0.5) return slice.slice(0, lastEnd + 1);
+  return slice.replace(/\s+\S*$/, '') + '…';
+}
+
+async function renderStoryTextBlock(text, size, isAr) {
+  // Pango markup lays the text out and wraps it to the box width. For
+  // Arabic, 'left' alignment means "start of the line", which for a
+  // right-to-left paragraph is the right-hand side, as wanted. Italic is
+  // skipped for Arabic because slanted Arabic script looks wrong.
+  const style = isAr ? '' : ' style="italic"';
+  return sharp({
+    text: {
+      text: `<span foreground="${BRAND_NAVY}"${style}>${escapeXml(text)}</span>`,
+      font: `sans ${size}`,
+      width: STORY_TEXT_W,
+      rgba: true,
+      wrap: 'word',
+      align: 'left',
+      dpi: 72,
+    },
+  })
+    .png()
+    .toBuffer({ resolveWithObject: true });
+}
+
+// Finds the largest font size at which the whole description fits inside
+// the story box. If it does not fit even at the smallest size, the text is
+// shortened (at a sentence boundary where possible) and tried again, so the
+// card always ends up complete and tidy rather than overflowing or being
+// chopped mid-word. Returns null if there is no description at all.
+async function renderStoryText(rawText, isAr) {
+  let text = cleanCardText(rawText);
+  if (!text) return null;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    for (const size of STORY_FONT_SIZES) {
+      const block = await renderStoryTextBlock(text, size, isAr);
+      if (block.info.height <= STORY_TEXT_MAX_H) return block;
+    }
+    text = truncateAtSentence(text, Math.floor(text.length * 0.8));
+  }
+  return renderStoryTextBlock(text, STORY_FONT_SIZES[STORY_FONT_SIZES.length - 1], isAr);
+}
+
+// Emergency fallback if the text layout above is ever unavailable: the
+// previous approach (hand-wrapped lines in the SVG), just with the wider
+// line length and extra lines. Not expected to be used.
+function renderStoryTextFallbackSvg(text, isAr, textStartX, y, fontFamily, anchorAttr) {
+  const lines = wrapText(cleanCardText(text), isAr ? 44 : 58, 4);
+  const tspans = lines
+    .map((line, i) => `<tspan x="${textStartX}" dy="${i === 0 ? 0 : 36}">${escapeXml(line)}</tspan>`)
+    .join('');
+  return `<text x="${textStartX}" y="${y}" font-family="${fontFamily}" font-size="26" fill="${BRAND_NAVY}" text-anchor="${anchorAttr}"${isAr ? '' : ' font-style="italic"'}>${tspans}</text>`;
+}
+
 // Generates a subtle paper-grain texture as an SVG filter, approximating
-// the reference template's kraft-paper background. This is a generated
-// approximation, not the exact source texture — if tabanni has the real
-// paper texture file, it can be swapped in directly for a closer match.
+// the reference template's kraft-paper background.
 function paperTextureSvg(w, h) {
   return `
     <filter id="paperGrain">
@@ -169,23 +318,31 @@ function paperTextureSvg(w, h) {
 /**
  * Generates the finished story image.
  * @param {Object} info
- * @param {string[]} info.photoUrls - up to 4 photo URLs (extras are ignored)
+ * @param {string[]} info.photoUrls - candidate photo URLs, oldest first (up to 10).
+ *   Duplicates are removed and up to 4 distinct photos are used.
  * @param {string} info.name
  * @param {string} info.animalType - 'dog' | 'cat' | etc
  * @param {string} info.age
  * @param {string} info.gender
  * @param {string} info.vaccination
- * @param {string} info.story - the short condensed caption (1-2 lines worth)
+ * @param {string} info.story - the description; shrunk or shortened cleanly to fit
  * @param {string} info.phone - a real phone number, OR fallback text if declined
  * @returns {Promise<Buffer>} PNG image buffer
  */
 async function generateStoryImage(info) {
-  const photoUrls = (info.photoUrls || []).slice(0, 4);
+  const candidateUrls = (info.photoUrls || []).slice(-10);
 
-  // 1) Prepare the 2x2 photo collage across the top.
-  const layout = buildGridLayout(photoUrls.length, CANVAS_W, PHOTO_AREA_H);
+  // 1) Pick up to 4 distinct photos and lay them out as the collage.
+  const photos = await pickDistinctPhotos(candidateUrls, 4);
+  const layout = buildGridLayout(photos.length, CANVAS_W, PHOTO_AREA_H);
   const photoBuffers = await Promise.all(
-    photoUrls.map((url, i) => fetchAndPrepPhoto(url, layout[i].w, layout[i].h).catch(() => null))
+    photos.map((p, i) =>
+      sharp(p.buffer)
+        .rotate()
+        .resize(layout[i].w, layout[i].h, { fit: 'cover', position: 'attention' })
+        .toBuffer()
+        .catch(() => null)
+    )
   );
   let photoLayer = sharp({
     create: { width: CANVAS_W, height: PHOTO_AREA_H, channels: 3, background: BOX_FILL },
@@ -197,16 +354,15 @@ async function generateStoryImage(info) {
   photoLayer = photoLayer.composite(compositeOps);
   const photoBuffer = await photoLayer.png().toBuffer();
 
-  // 2) Build the rest as one SVG overlay: paper background, story box
-  // (name + tags + description), "CONTACT INFO:" label, contact box.
-  const isAr = isArabicText(info.name) || isArabicText(info.story);
+  // 2) Name, tags and contact box go in one SVG overlay; the description is
+  // laid out separately (above) so it can be measured to fit.
+  const name = cleanCardText(info.name);
+  const isAr = isArabicText(name) || isArabicText(info.story);
   const fontFamily = isAr ? 'NotoSansArabic' : 'NotoSans';
   const anchorAttr = isAr ? 'end' : 'start';
-  const padX = 40;
-  const textStartX = isAr ? STORY_BOX.x + STORY_BOX.w - padX : STORY_BOX.x + padX;
+  const textStartX = isAr ? STORY_BOX.x + STORY_BOX.w - STORY_PAD_X : STORY_BOX.x + STORY_PAD_X;
 
-  const tags = [info.age, info.gender, info.vaccination].filter(Boolean);
-  const storyLines = wrapText(info.story, isAr ? 34 : 46, 2);
+  const tags = [info.age, info.gender, info.vaccination].map(cleanCardText).filter(Boolean);
 
   let tagX = textStartX;
   const tagEls = [];
@@ -221,19 +377,11 @@ async function generateStoryImage(info) {
     tagX = isAr ? rectX - 12 : rectX + tagW + 12;
   }
 
-  const storyTspans = storyLines
-    .map((line, i) => `<tspan x="${textStartX}" dy="${i === 0 ? 0 : 38}">${escapeXml(line)}</tspan>`)
-    .join('');
-
   const contactLabelText = 'CONTACT INFO:';
 
-  // Contact box text now adapts its font size and wraps to a second line
-  // when needed (see fitContactText above), instead of always rendering
-  // at one fixed large size on one line. A real phone number still gets
-  // the original big, clean single-line look; longer fallback text (e.g.
-  // a declined phone, or a username) shrinks and wraps to fit inside the
-  // box instead of overflowing off the card.
-  const contactFit = fitContactText(info.phone);
+  // Contact box text adapts its font size and wraps to a second line when
+  // needed (see fitContactText above).
+  const contactFit = fitContactText(cleanCardText(info.phone));
   const contactIsAr = isArabicText(info.phone);
   const contactFontFamily = contactIsAr ? 'NotoSansArabic' : 'NotoSans';
   const contactLineHeight = contactFit.fontSize + 10;
@@ -242,6 +390,16 @@ async function generateStoryImage(info) {
   const contactTspans = contactFit.lines
     .map((line, i) => `<tspan x="${CANVAS_W / 2}" dy="${i === 0 ? 0 : contactLineHeight}">${escapeXml(line)}</tspan>`)
     .join('');
+
+  // 3) The description, measured to fit the box.
+  let storyBlock = null;
+  let storyFallbackSvg = '';
+  try {
+    storyBlock = await renderStoryText(info.story, isAr);
+  } catch (err) {
+    console.error('Story card: text layout failed, using simple fallback:', err.message);
+    storyFallbackSvg = renderStoryTextFallbackSvg(info.story, isAr, textStartX, tagY + 90, fontFamily, anchorAttr);
+  }
 
   const overlaySvg = `
     <svg width="${CANVAS_W}" height="${CANVAS_H}" xmlns="http://www.w3.org/2000/svg">
@@ -259,11 +417,11 @@ async function generateStoryImage(info) {
       <!-- Story box: name, tags, description -->
       <rect x="${STORY_BOX.x}" y="${STORY_BOX.y}" width="${STORY_BOX.w}" height="${STORY_BOX.h}" rx="${STORY_BOX.r}" fill="${BOX_FILL}" />
 
-      <text x="${textStartX}" y="${STORY_BOX.y + 58}" font-family="${fontFamily}" font-size="46" font-weight="500" fill="${BRAND_NAVY}" text-anchor="${anchorAttr}">${escapeXml(info.name)}</text>
+      <text x="${textStartX}" y="${STORY_BOX.y + 58}" font-family="${fontFamily}" font-size="46" font-weight="500" fill="${BRAND_NAVY}" text-anchor="${anchorAttr}">${escapeXml(name)}</text>
 
       ${tagEls.join('')}
 
-      <text x="${textStartX}" y="${tagY + 90}" font-family="${fontFamily}" font-size="28" fill="${BRAND_NAVY}" text-anchor="${anchorAttr}" font-style="italic">${storyTspans}</text>
+      ${storyFallbackSvg}
 
       <!-- "CONTACT INFO:" label -->
       <text x="${CANVAS_W / 2}" y="${CONTACT_LABEL_Y}" font-family="${fontFamily}" font-size="34" font-weight="500" fill="${BRAND_NAVY}" text-anchor="middle" letter-spacing="1">${contactLabelText}</text>
@@ -274,17 +432,18 @@ async function generateStoryImage(info) {
     </svg>
   `;
 
-  const finalImage = await sharp({
+  const layers = [{ input: Buffer.from(overlaySvg), left: 0, top: 0 }];
+  if (storyBlock) {
+    layers.push({ input: storyBlock.data, left: STORY_BOX.x + STORY_PAD_X, top: STORY_TEXT_TOP });
+  }
+  layers.push({ input: photoBuffer, left: 0, top: 0 });
+
+  return sharp({
     create: { width: CANVAS_W, height: CANVAS_H, channels: 3, background: PAPER_BG },
   })
-    .composite([
-      { input: Buffer.from(overlaySvg), left: 0, top: 0 },
-      { input: photoBuffer, left: 0, top: 0 },
-    ])
+    .composite(layers)
     .png()
     .toBuffer();
-
-  return finalImage;
 }
 
 module.exports = { generateStoryImage };

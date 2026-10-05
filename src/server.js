@@ -308,8 +308,12 @@ app.post('/api/test-chat', async (req, res) => {
     let intake = false;
     const lastUserMsg = [...history].reverse().find(m => m.role === 'user');
 
-    const intakeParsed = parseAllIntakeMarkers(reply);
+       const intakeParsed = parseAllIntakeMarkers(reply);
     if (intakeParsed) {
+      const ageQuestion = buildAgeClarification(languageOfConversation(history), intakeParsed.summaries.map(parseIntakeFields));
+      if (ageQuestion) {
+        return res.json({ reply: ageQuestion, handoff: false, intake: false });
+      }
       intake = true;
       outgoingText = buildIntakeThanks(languageOfConversation(history), intakeParsed.summaries.map(parseIntakeFields));
       for (let i = 0; i < intakeParsed.summaries.length; i++) {

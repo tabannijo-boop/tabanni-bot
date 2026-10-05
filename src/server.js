@@ -756,7 +756,22 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     ? 'CONTEXT NOTE: the person has either never messaged before, or has been silent for 7 or more days since their last message. Treat this reply as a fresh conversation start: include the full opening/disclosure message pattern (mentioning this is tabanni\'s AI agent, plus the trial-phase note), the same as you would for a brand new conversation, even if the message history below shows earlier messages.'
     : '';
 
-  const reply = await getVerifiedClaudeReply(history, greetingNote);
+   const reply = await getVerifiedClaudeReply(history, greetingNote);
+
+  // Safeguard: never complete an intake while an age is only a number. Ask
+  // for the unit instead, and remember the question (not the held-back
+  // intake) as the bot's reply. Nothing is paused or sent to the team yet.
+  const earlyIntake = parseAllIntakeMarkers(reply);
+  if (earlyIntake) {
+    const ageQuestion = buildAgeClarification(languageOfConversation(history), earlyIntake.summaries.map(parseIntakeFields));
+    if (ageQuestion) {
+      await addAssistantMessage(senderId, ageQuestion);
+      await sendInstagramReply(senderId, ageQuestion);
+      console.log(`❓ Intake for ${senderId} held back: an age had no unit (years or months), asked the person.`);
+      return;
+    }
+  }
+
   await addAssistantMessage(senderId, reply);
 
   // --- Human handoff: did Claude flag this as something it can't safely ---

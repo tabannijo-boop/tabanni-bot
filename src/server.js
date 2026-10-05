@@ -228,8 +228,38 @@ Thank you very much for your care.`;
 }
 
 // Wraps getClaudeReply with a language check + one automatic retry if the
-// reply came back in the wrong language. This is the real fix for language
-// mismatches — a prompt instruction alone was not reliable enough on its
+// --- Ages must have a unit --------------------------------------------------
+// "5" could mean five years or five months, and the story card prints the age
+// as a tag, so a bare number must never get through. The prompt tells Claude
+// to ask, and this is the safeguard behind it: if an intake arrives with an
+// age that is only a number (Latin or Arabic-Indic digits, no words such as
+// years, months, weeks, سنة, شهور), the intake is held back and the person is
+// asked instead.
+function isBareNumberAge(age) {
+  const a = String(age || '').trim();
+  if (!a) return false;
+  const hasDigit = /[0-9\u0660-\u0669\u06F0-\u06F9]/.test(a);
+  const hasWord = /[A-Za-z\u0621-\u064A]/.test(a); // Arabic letters only, not Arabic digits
+  return hasDigit && !hasWord;
+}
+
+// Returns the question to send, or null when every age already has a unit.
+function buildAgeClarification(lang, fieldsList) {
+  const bare = fieldsList.filter((f) => isBareNumberAge(f.age));
+  if (bare.length === 0) return null;
+  const names = bare.map((f) => f.name).filter(Boolean);
+  const ar = names.length
+    ? `ممكن توضحوا إذا عمر ${names.join(' و ')} بالسنوات ولا بالشهور؟`
+    : 'ممكن توضحوا إذا العمر بالسنوات ولا بالشهور؟';
+  const en = names.length
+    ? `Could you please tell us if the age of ${names.join(' and ')} is in years or months?`
+    : 'Could you please tell us if the age is in years or months?';
+  if (lang === 'ar') return ar;
+  if (lang === 'en') return en;
+  return `${ar}\n\n${en}`;
+}
+
+// Wraps getClaudeReply with a language check + one automatic retry if the// mismatches — a prompt instruction alone was not reliable enough on its
 // own, this actually verifies the output before it gets sent.
 //
 // baseNote (optional): extra context included in EVERY call for this turn,

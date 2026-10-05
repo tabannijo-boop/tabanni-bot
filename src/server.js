@@ -57,6 +57,9 @@ async function sendInstagramReply(senderId, text) {
 // The [[INTAKE]] marker is different from [[HANDOFF]] and [[FLAG]]: it wraps
 // a structured summary block, followed by the actual reply to send the
 // person. Format: [[INTAKE]]...summary...[[/INTAKE]]reply text here
+// Returns null if the reply doesn't start with [[INTAKE]] or is malformed.
+const INTAKE_MARKER_START = '[[INTAKE]]';
+const INTAKE_MARKER_END = '[[/INTAKE]]';
 // Finds every [[INTAKE]]...[[/INTAKE]] block in a reply (there can be more
 // than one, when someone is surrendering multiple pets together and each
 // animal gets its own summary block), and returns the outgoing text with
@@ -91,10 +94,10 @@ function parseNursingMarker(reply) {
 }
 
 // Pulls the labeled fields (Name, Type, Age, Gender, Vaccination status,
-// Phone number, Story, Photo count) out of a single [[INTAKE]] summary
-// block, so they can be passed to the story image generator as structured
-// data instead of raw text. Matches the format defined in knowledge.js —
-// if that format ever changes, update the labels here to match.
+// Phone number, Story) out of the [[INTAKE]] summary block, so they can be
+// passed to the story image generator as structured data instead of raw
+// text. Matches the format defined in knowledge.js — if that format ever
+// changes, update the labels here to match.
 function parseIntakeFields(summary) {
   const getField = (label) => {
     const re = new RegExp(`${label}\\s*:\\s*(.+)`, 'i');
@@ -112,8 +115,8 @@ function parseIntakeFields(summary) {
     phone: getField('Phone number'),
     story: getField('Story'),
     // How many of the pooled photos belong to this specific pet, in a
-    // multi-pet intake. null when not present (single-pet intakes never
-    // need this, they just take the most recent photos directly).
+    // multi-pet intake (see PHOTO ATTRIBUTION note where this is used).
+    // null when not present (e.g. single-pet intakes never need this).
     photoCount: Number.isFinite(photoCount) ? photoCount : null,
   };
 }
@@ -152,6 +155,78 @@ function detectLanguage(text) {
   return arabicChars > latinChars ? 'ar' : 'en';
 }
 
+// The bot adds a note like "[sent 3 photo(s) and 1 video(s)]" to a person's
+// message when they send media. That note is in English whatever language
+// the person writes, so it must never be used to decide what language they
+// are speaking (it used to make Arabic speakers look like English speakers
+// right after sending photos).
+function stripAttachmentNotes(text) {
+  return String(text || '').replace(/\[sent [^\]]*\]/gi, ' ').trim();
+}
+
+// The language the person is actually writing in: their most recent message
+// that has real words in it. Messages that are just a phone number, an
+// emoji, or the automatic photo note are skipped and the previous message
+// is used instead (same rule the prompt gives Claude).
+function languageOfConversation(history) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role !== 'user') continue;
+    const lang = detectLanguage(stripAttachmentNotes(history[i].content));
+    if (lang) return lang;
+  }
+  return null;
+}
+
+// Safeguard: a conversation that has been trimmed to its latest messages
+// can start with one of the bot's own replies. Drop any such leading bot
+// messages so the history always opens with the person's message.
+function dropLeadingBotMessages(history) {
+  let i = 0;
+  while (i < history.length && history[i].role !== 'user') i++;
+  return history.slice(i);
+}
+
+// --- The thank-you sent when an adoption intake is complete ----------------
+// This is a fixed message, written here instead of being left to Claude, so
+// the wording is always exactly right (Claude used to improvise and
+// sometimes garbled it). It thanks the owner, and reminds THEM to check that
+// whoever contacts them is a responsible person who will look after the
+// animal and take it to the vet. tabanni does not vet adopters for these
+// owner-surrendered animals, so this is not a promise that tabanni will.
+function classifyGender(g) {
+  const t = String(g || '').toLowerCase();
+  if (/female|girl|\bshe\b|انثى|أنثى|انثي|أنثي|بنت|بنوتة|صبية/.test(t)) return 'female';
+  if (/male|boy|\bhe\b|ذكر|ولد|صبي/.test(t)) return 'male';
+  return null;
+}
+
+function buildIntakeThanks(lang, fieldsList) {
+  const many = fieldsList.length > 1;
+  const g = many ? null : classifyGender(fieldsList[0] && fieldsList[0].gender);
+
+  const arForms = g === 'female'
+    ? { about: 'عنها', care: 'فيها', take: 'ياخدها' }
+    : g === 'male'
+      ? { about: 'عنه', care: 'فيه', take: 'ياخده' }
+      : { about: 'عنهم', care: 'فيهم', take: 'ياخدهم' };
+  const ar = `شكراً لتزويدنا بكل التفاصيل. وصلتنا كل المعلومات ورح ننشر ${arForms.about} بالستوري قريباً.
+
+لطفاً تأكدوا انه اي حدا بيتواصل معكم شخص مسؤول، رح يهتم ${arForms.care} منيح و${arForms.take} على العيادة للفحص والتطعيمات.
+
+شكراً كتير على رعايتكم.`;
+
+  const en_obj = g === 'female' ? 'her' : g === 'male' ? 'him' : 'them';
+  const en = `Thank you for sharing all the details. We received everything and will post about ${en_obj} on our stories soon.
+
+Please make sure that whoever contacts you is a responsible person who will take good care of ${en_obj} and take ${en_obj} to the vet for a check-up and vaccinations.
+
+Thank you very much for your care.`;
+
+  if (lang === 'ar') return ar;
+  if (lang === 'en') return en;
+  return `${ar}\n\n${en}`;
+}
+
 // Wraps getClaudeReply with a language check + one automatic retry if the
 // reply came back in the wrong language. This is the real fix for language
 // mismatches — a prompt instruction alone was not reliable enough on its
@@ -162,10 +237,10 @@ function detectLanguage(text) {
 // knows to treat this as a fresh conversation start even though the stored
 // history might still contain older messages.
 async function getVerifiedClaudeReply(history, baseNote = '') {
+  history = dropLeadingBotMessages(history);
   const reply = await getClaudeReply(history, baseNote);
 
-  const lastUserMsg = [...history].reverse().find((m) => m.role === 'user');
-  const expectedLang = detectLanguage(lastUserMsg?.content);
+  const expectedLang = languageOfConversation(history);
   const actualLang = detectLanguage(extractOutgoingText(reply));
 
   if (expectedLang && actualLang && expectedLang !== actualLang) {
@@ -206,7 +281,7 @@ app.post('/api/test-chat', async (req, res) => {
     const intakeParsed = parseAllIntakeMarkers(reply);
     if (intakeParsed) {
       intake = true;
-      outgoingText = intakeParsed.outgoingText;
+      outgoingText = buildIntakeThanks(languageOfConversation(history), intakeParsed.summaries.map(parseIntakeFields));
       for (let i = 0; i < intakeParsed.summaries.length; i++) {
         const petLabel = intakeParsed.summaries.length > 1 ? ` (pet ${i + 1} of ${intakeParsed.summaries.length})` : '';
         await sendTelegramNotificationWithButton(
@@ -311,13 +386,155 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// --- Media batching: when photos/videos arrive, wait up to this long for ---
-// more to come in before forwarding everything to Telegram together and
-// generating one reply, instead of reacting to every single photo
-// separately. Matches how people actually send a batch of photos: several
-// quick messages in a row, not one at a time with pauses.
-const MEDIA_BATCH_WINDOW_MS = 100 * 1000;
-const pendingMediaBatches = new Map(); // senderId -> { items: [{url,type}], texts: [string], timer }
+// --- Gathering a person's messages before replying -------------------------
+// People rarely send one tidy message. They send a name, then an age, then a
+// photo, then a phone number, as separate messages seconds apart. Replying to
+// each one separately produces a pile of half-answers and repeated questions.
+// So after a person's message the bot waits for a quiet moment, collecting
+// everything they send, and then replies ONCE to all of it. Every new message
+// restarts the wait, up to a hard limit so a long stream of messages cannot
+// delay the reply forever.
+//
+//   REPLY_WAIT_SECONDS  quiet time after a TEXT message before replying (default 60,
+//                       0 = reply immediately to each text message)
+//   MEDIA_WAIT_SECONDS  quiet time after a PHOTO or VIDEO (default 100, because
+//                       uploading several photos takes people longer)
+//   MAX_BATCH_WAIT_SECONDS  longest the bot will keep waiting in total (default 240)
+//
+// Every message is saved the moment it arrives, so nothing is lost if the
+// server restarts during the wait; only the reply is delayed.
+function secondsFromEnv(name, defaultSeconds) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return defaultSeconds * 1000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n * 1000 : defaultSeconds * 1000;
+}
+const replyWaitMs = () => secondsFromEnv('REPLY_WAIT_SECONDS', 60);
+const mediaWaitMs = () => secondsFromEnv('MEDIA_WAIT_SECONDS', 100);
+const maxBatchWaitMs = () => secondsFromEnv('MAX_BATCH_WAIT_SECONDS', 240);
+
+const pendingTurns = new Map(); // senderId -> { texts: [string], items: [{url,type}], timer, firstAt }
+
+// Runs jobs for the same person one at a time, so two replies to the same
+// person can never be generated at the same moment.
+const senderQueues = new Map();
+function runSerialized(senderId, fn) {
+  const previous = senderQueues.get(senderId) || Promise.resolve();
+  const next = previous.catch(() => {}).then(fn);
+  senderQueues.set(senderId, next);
+  next.catch(() => {}).then(() => {
+    if (senderQueues.get(senderId) === next) senderQueues.delete(senderId);
+  });
+  return next;
+}
+
+function flushPendingTurnNow(senderId) {
+  return runSerialized(senderId, () => flushPendingTurn(senderId));
+}
+
+// Adds a message (text and/or photos/videos) to the person's waiting batch
+// and (re)starts the quiet-time countdown.
+async function addToPendingTurn(senderId, { text, mediaItems }) {
+  let pending = pendingTurns.get(senderId);
+  if (!pending) {
+    pending = { texts: [], items: [], timer: null, firstAt: Date.now() };
+    pendingTurns.set(senderId, pending);
+  }
+  const hasText = !!(text && text.trim());
+  const hasMedia = !!(mediaItems && mediaItems.length);
+
+  if (hasText) {
+    pending.texts.push(text.trim());
+    await addUserMessage(senderId, text.trim()); // saved right away, see note above
+  }
+  if (hasMedia) pending.items.push(...mediaItems);
+
+  if (pending.timer) clearTimeout(pending.timer);
+  const wait = hasMedia ? mediaWaitMs() : replyWaitMs();
+  if (wait <= 0) {
+    await flushPendingTurnNow(senderId);
+    return;
+  }
+  const untilHardLimit = Math.max(0, pending.firstAt + maxBatchWaitMs() - Date.now());
+  const delay = Math.min(wait, untilHardLimit);
+  pending.timer = setTimeout(() => {
+    flushPendingTurnNow(senderId).catch((err) => console.error('Error replying after wait:', err));
+  }, delay);
+  console.log(`⏳ Holding ${senderId}'s message(s) — will reply in ${Math.round(delay / 1000)}s unless more arrive.`);
+}
+
+// The wait is over: forward any photos/videos to Telegram, remember the
+// photos for the story card, and reply once to everything the person sent.
+async function flushPendingTurn(senderId) {
+  const pending = pendingTurns.get(senderId);
+  if (!pending) return;
+  pendingTurns.delete(senderId);
+  if (pending.timer) clearTimeout(pending.timer);
+
+  const parts = [...pending.texts];
+  let displayName;
+
+  if (pending.items.length > 0) {
+    if (await isPaused(senderId)) {
+      console.log(`Conversation with ${senderId} is paused — dropping buffered photos/videos without replying.`);
+    } else {
+      const profile = await getInstagramUserProfile(senderId);
+      displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
+
+      const photoCount = pending.items.filter((i) => i.type === 'image').length;
+      const videoCount = pending.items.filter((i) => i.type === 'video').length;
+
+      // Telegram caps captions at 1024 characters; stay safely under it.
+      const caption = `📸 From ${displayName}${pending.texts.length ? `\n"${pending.texts.join(' ')}"` : ''}`.slice(0, 900);
+      await sendTelegramMediaGroup(caption, pending.items);
+
+      for (const item of pending.items) {
+        if (item.type === 'image') await addPhotoUrl(senderId, item.url);
+      }
+
+      const kindParts = [];
+      if (photoCount) kindParts.push(`${photoCount} photo(s)`);
+      if (videoCount) kindParts.push(`${videoCount} video(s)`);
+      const attachmentNote = `[sent ${kindParts.join(' and ')}]`;
+      parts.push(attachmentNote);
+      await addUserMessage(senderId, attachmentNote);
+    }
+  }
+
+  if (parts.length === 0) return;
+  await processTurn(senderId, parts.join('\n'), displayName);
+}
+
+// Pulls a usable message out of a link-preview ("fallback") attachment.
+// Prefers what the person actually typed. If they typed nothing, looks for a
+// phone number in the preview's title or link (Instagram turns numbers into
+// "tel:" links), and failing that uses the preview's own title or link.
+// Returns null if there is nothing usable, so the caller can fall back to
+// asking the person to type their message.
+function recoverTextFromLinkPreview(typedText, previews) {
+  if (typedText && typedText.trim()) return typedText.trim();
+
+  const candidates = [];
+  for (const p of previews) {
+    const url = p?.payload?.url || p?.url || '';
+    const title = p?.payload?.title || p?.title || '';
+    let decodedUrl = url;
+    try { decodedUrl = decodeURIComponent(url); } catch (e) { /* keep raw */ }
+    candidates.push(decodedUrl.replace(/^tel:/i, ''), title);
+  }
+
+  // A phone number: 7 to 15 digits, optionally with +, spaces, dashes, dots, brackets.
+  for (const c of candidates) {
+    const m = String(c).match(/\+?\d[\d\s\-().]{5,}\d/);
+    if (m) {
+      const digits = m[0].replace(/\D/g, '');
+      if (digits.length >= 7 && digits.length <= 15) return m[0].trim();
+    }
+  }
+
+  const fallbackText = candidates.map((c) => String(c).trim()).find(Boolean);
+  return fallbackText || null;
+}
 
 async function handleMessagingEvent(event) {
   const senderId = event.sender?.id;
@@ -366,7 +583,7 @@ async function handleMessagingEvent(event) {
     }
   }
 
-  const userText = message.text;
+  let userText = message.text;
   const mediaAttachments = Array.isArray(message.attachments)
     ? message.attachments.filter((a) => a.type === 'image' || a.type === 'video')
     : [];
@@ -374,6 +591,31 @@ async function handleMessagingEvent(event) {
     ? message.attachments.filter((a) => a.type !== 'image' && a.type !== 'video')
     : [];
   const hasAttachments = mediaAttachments.length > 0;
+
+  // Log what kind of non-photo attachment arrived (type only, never the
+  // contents) so any new kind of attachment is easy to diagnose in Render.
+  if (otherAttachments.length > 0) {
+    console.log(`📎 Non-media attachment(s) from ${senderId}: ${JSON.stringify(otherAttachments.map((a) => ({ type: a.type, hasUrl: !!a?.payload?.url, hasTitle: !!a?.payload?.title })))}${userText ? ' (message also has text)' : ''}`);
+  }
+
+  // LINK PREVIEWS ("fallback" attachments). When someone sends a phone
+  // number, a web address, or anything else Instagram turns into a tappable
+  // link, Instagram wraps it in a little preview card and sends it as a
+  // "fallback" attachment, usually with the text they actually typed still
+  // in message.text. That is not a voice note and not a story/post share, so
+  // it must not trigger the "can't receive this" reply or pause the chat.
+  // The typed text (or, if there is none, the number/link found in the
+  // preview) is used as the message instead.
+  const linkPreviewAttachments = otherAttachments.filter((a) => a.type === 'fallback');
+  const otherNonPreviewAttachments = otherAttachments.filter((a) => a.type !== 'fallback');
+  let linkPreviewHandledAsText = false;
+  if (!hasAttachments && linkPreviewAttachments.length > 0 && otherNonPreviewAttachments.length === 0) {
+    const recovered = recoverTextFromLinkPreview(userText, linkPreviewAttachments);
+    if (recovered) {
+      userText = recovered;
+      linkPreviewHandledAsText = true;
+    }
+  }
 
   // Voice notes specifically: the bot cannot transcribe audio, but this is
   // fully self-resolvable by just asking the person to type instead, so no
@@ -386,11 +628,11 @@ async function handleMessagingEvent(event) {
   // nothing here worth pausing the conversation or alerting the team
   // over, so it is handled the same gentle way as a voice note: just ask
   // the person to type it normally.
-  const emptyFallbackAttachments = otherAttachments.filter((a) => a.type !== 'audio' && !a?.payload?.url);
-  const trulyUnsupportedAttachments = otherAttachments.filter((a) => a.type !== 'audio' && a?.payload?.url);
+  const emptyFallbackAttachments = linkPreviewHandledAsText ? [] : otherAttachments.filter((a) => a.type !== 'audio' && !a?.payload?.url);
+  const trulyUnsupportedAttachments = linkPreviewHandledAsText ? [] : otherAttachments.filter((a) => a.type !== 'audio' && a?.payload?.url);
 
   if (!hasAttachments && voiceNoteAttachments.length > 0) {
-    if (pendingMediaBatches.has(senderId)) await flushMediaBatch(senderId);
+    await flushPendingTurnNow(senderId);
     const askToTypeText = 'عذراً، ما نقدر نستمع للرسائل الصوتية لأن هذا بوت ذكاء اصطناعي. ممكن تكتبولنا اللي حابين تحكوه بالنص لو سمحتوا؟\n\nSorry, we are not able to listen to voice notes as this is an AI chatbot. Could you please write down what you would like to say instead?';
     await sendInstagramReply(senderId, askToTypeText);
     console.log(`🎙️ Voice note from ${senderId} — asked them to type instead, bot stays active.`);
@@ -398,7 +640,7 @@ async function handleMessagingEvent(event) {
   }
 
   if (!hasAttachments && emptyFallbackAttachments.length > 0) {
-    if (pendingMediaBatches.has(senderId)) await flushMediaBatch(senderId);
+    await flushPendingTurnNow(senderId);
     const askToTypeText = 'عذراً، ما قدرنا نستقبل هاد النوع من الرسائل. ممكن تكتبولنا اللي حابين تحكوه بالنص لو سمحتوا؟\n\nSorry, we were not able to receive that type of message. Could you please write it out as text instead?';
     await sendInstagramReply(senderId, askToTypeText);
     console.log(`📎 Empty/fallback attachment (e.g. failed share) from ${senderId} — asked them to type instead, bot stays active.`);
@@ -409,7 +651,7 @@ async function handleMessagingEvent(event) {
   // genuinely cannot process (there is nothing to "type instead" for a
   // story mention): goes to a volunteer with a general acknowledgment.
   if (!hasAttachments && trulyUnsupportedAttachments.length > 0) {
-    if (pendingMediaBatches.has(senderId)) await flushMediaBatch(senderId);
+    await flushPendingTurnNow(senderId);
     const ackText = 'شكراً لرسالتكم سيتم الرد عليكم من قبل احد متطوعين تبني بأسرع وقت ممكن\n\nThank you for your message. One of tabanni\'s volunteers will get back to you as soon as possible.';
     await sendInstagramReply(senderId, ackText);
     await setManualPause(senderId, true);
@@ -428,77 +670,21 @@ async function handleMessagingEvent(event) {
   }
 
   if (hasAttachments) {
-    // Buffer this media instead of processing immediately — see flushMediaBatch.
-    let batch = pendingMediaBatches.get(senderId);
-    if (!batch) {
-      batch = { items: [], texts: [], timer: null };
-      pendingMediaBatches.set(senderId, batch);
-    }
-    // Reset the timer on every new arrival — this makes it a rolling
-    // "100 seconds of silence" window instead of a fixed one-shot window
-    // from the first photo, so someone sending photos in slow bursts over
-    // several minutes still gets bundled into ONE batch, not several.
-    if (batch.timer) clearTimeout(batch.timer);
-    batch.timer = setTimeout(() => {
-      flushMediaBatch(senderId).catch((err) => console.error('Media batch flush error:', err));
-    }, MEDIA_BATCH_WINDOW_MS);
+    // Photos/videos: collect them (and any caption) and wait for more.
+    const mediaItems = [];
     for (const att of mediaAttachments) {
       const attUrl = att?.payload?.url;
       if (!attUrl) continue;
-      batch.items.push({ url: attUrl, type: att.type });
+      mediaItems.push({ url: attUrl, type: att.type });
     }
-    if (userText) batch.texts.push(userText);
-    console.log(`Buffered ${mediaAttachments.length} attachment(s) for ${senderId} — will flush in up to ${MEDIA_BATCH_WINDOW_MS / 1000}s.`);
+    await addToPendingTurn(senderId, { text: userText, mediaItems });
     return;
-  }
-
-  // A real text message arrived. If there's a media batch waiting for this
-  // same person, flush it first (so photos get handled in the order they
-  // actually came in), then continue with this text message normally.
-  if (pendingMediaBatches.has(senderId)) {
-    await flushMediaBatch(senderId);
   }
 
   if (!userText) return; // nothing to respond to (e.g. a sticker with no attachments array)
 
-  await processTurn(senderId, userText);
-}
-
-// Called once the 100-second window closes: forwards everything collected
-// as one grouped album, tracks photo URLs for story generation, then
-// processes it as a single turn (same as a normal text message).
-async function flushMediaBatch(senderId) {
-  const batch = pendingMediaBatches.get(senderId);
-  if (!batch) return;
-  pendingMediaBatches.delete(senderId);
-  if (batch.timer) clearTimeout(batch.timer);
-  if (batch.items.length === 0) return;
-
-  if (await isPaused(senderId)) {
-    console.log(`Conversation with ${senderId} is paused — dropping buffered media batch without replying.`);
-    return;
-  }
-
-  const profile = await getInstagramUserProfile(senderId);
-  const displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
-
-  const photoCount = batch.items.filter((i) => i.type === 'image').length;
-  const videoCount = batch.items.filter((i) => i.type === 'video').length;
-
-  const caption = `📸 From ${displayName}${batch.texts.length ? `\n"${batch.texts.join(' ')}"` : ''}`;
-  await sendTelegramMediaGroup(caption, batch.items);
-
-  for (const item of batch.items) {
-    if (item.type === 'image') await addPhotoUrl(senderId, item.url);
-  }
-
-  const kindParts = [];
-  if (photoCount) kindParts.push(`${photoCount} photo(s)`);
-  if (videoCount) kindParts.push(`${videoCount} video(s)`);
-  const attachmentNote = `[sent ${kindParts.join(' and ')}]`;
-  const effectiveText = batch.texts.length ? `${batch.texts.join(' ')} ${attachmentNote}` : attachmentNote;
-
-  await processTurn(senderId, effectiveText, displayName);
+  // A text message: collect it and wait for more before replying.
+  await addToPendingTurn(senderId, { text: userText });
 }
 
 // Shared logic for handling one "turn": add the message to history, ask
@@ -508,10 +694,20 @@ async function flushMediaBatch(senderId) {
 // text message and a flushed media batch, so behavior is identical either
 // way.
 async function processTurn(senderId, effectiveText, precomputedDisplayName) {
-  await addUserMessage(senderId, effectiveText);
-
+  // The person's message(s) were already saved to the history when they
+  // arrived (see addToPendingTurn / flushPendingTurn).
   if (await isPaused(senderId)) {
     console.log(`Conversation with ${senderId} is paused — bot staying quiet.`);
+    return;
+  }
+
+  // If the last thing in the history is already the bot's own reply, there
+  // is nothing new to answer (this can happen when messages arrive while a
+  // reply is being written). Replying again would just continue the bot's
+  // previous message.
+  const history = await getHistory(senderId);
+  if (!history.length || history[history.length - 1].role !== 'user') {
+    console.log(`Nothing new to answer for ${senderId} — skipping.`);
     return;
   }
 
@@ -526,7 +722,7 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     ? 'CONTEXT NOTE: the person has either never messaged before, or has been silent for 7 or more days since their last message. Treat this reply as a fresh conversation start: include the full opening/disclosure message pattern (mentioning this is tabanni\'s AI agent, plus the trial-phase note), the same as you would for a brand new conversation, even if the message history below shows earlier messages.'
     : '';
 
-  const reply = await getVerifiedClaudeReply(await getHistory(senderId), greetingNote);
+  const reply = await getVerifiedClaudeReply(history, greetingNote);
   await addAssistantMessage(senderId, reply);
 
   // --- Human handoff: did Claude flag this as something it can't safely ---
@@ -551,7 +747,9 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   const nursingParsed = parseNursingMarker(reply);
   if (intakeParsed) {
     intakeSummaries = intakeParsed.summaries;
-    outgoingText = intakeParsed.outgoingText;
+    // The thank-you for a completed intake is a fixed message (see
+    // buildIntakeThanks), not whatever Claude happened to write after the block.
+    outgoingText = buildIntakeThanks(languageOfConversation(history), intakeSummaries.map(parseIntakeFields));
   } else if (nursingParsed) {
     nursingInfo = nursingParsed;
     outgoingText = nursingParsed.outgoingText;
@@ -640,7 +838,7 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
         fields = parseIntakeFields(summary);
         let photoUrls;
         if (intakeSummaries.length === 1) {
-          photoUrls = allPhotoUrls.slice(-4); // single pet: most recent 4, as before
+          photoUrls = allPhotoUrls.slice(-8); // single pet: recent photos; the card drops duplicates and uses up to 4 distinct ones
         } else {
           const count = fields.photoCount != null ? fields.photoCount : 0;
           photoUrls = allPhotoUrls.slice(photoCursor, photoCursor + count);

@@ -18,17 +18,14 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// (AUTO_PAUSE_MINUTES removed: pauseAfterHumanReply now uses the same
-// 24-hour window as every other pause case, see HANDOFF_PAUSE_EXPIRY_MS.)
 const MAX_HISTORY_MESSAGES = 12; // keep the last N turns so replies stay short & cheap
 const MAX_TRACKED_PHOTOS = 10;
 
-// After a handoff (someone asked for Sereen/marketing/a human, or the bot
-// could not answer), the bot stays quiet on that conversation indefinitely,
-// UNLESS the same person messages again after this many hours have passed —
-// at which point it is treated as a fresh conversation and the bot resumes
-// answering normally.
-const HANDOFF_PAUSE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+// Every pause case (a team member replying, a handoff, a flag, a finished
+// intake) keeps the bot quiet on that one conversation for this long, and
+// then the bot resumes by itself.
+const PAUSE_SECONDS = 24 * 60 * 60;
+const HANDOFF_PAUSE_EXPIRY_MS = PAUSE_SECONDS * 1000; // used only for older pause records, see isPaused
 
 // How long a conversation's state is kept in Redis after its last activity.
 // Just housekeeping so old, long-finished conversations don't sit forever —
@@ -48,11 +45,37 @@ const GREETING_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
 // Instagram to echo a message back.
 const BOT_ECHO_WINDOW_SECONDS = 120;
 
+// How long "the bot just sent something to this person" is remembered. Used
+// as a second way to recognize the bot's own echo (see recentlySentByBot).
+// Deliberately short: the bot's own echo arrives within about a second, while
+// a person needs several seconds to read and type, so a team member's reply
+// is never mistaken for the bot.
+const BOT_RECENT_SEND_SECONDS = 3;
+
+// While the bot is collecting an animal's details (a surrender/rehoming
+// intake, or the nursing-mother flow), photos and videos are wanted. This is
+// how long that stays switched on after the last sign the flow is going.
+const COLLECTING_SECONDS = 24 * 60 * 60;
+
 function convoKey(userId) {
   return `tabanni:convo:${userId}`;
 }
 function echoKey(messageId) {
   return `tabanni:echo:${messageId}`;
+}
+// The pause lives under its OWN key, not inside the conversation record.
+// The conversation record is read, changed and saved back on almost every
+// message, so a pause stored inside it could be wiped out by a save that
+// started a moment before a team member replied. A key of its own cannot be
+// overwritten by those saves, and it expires by itself after 24 hours.
+function pauseKey(userId) {
+  return `tabanni:pause:${userId}`;
+}
+function collectingKey(userId) {
+  return `tabanni:collecting:${userId}`;
+}
+function botSendKey(userId) {
+  return `tabanni:botsend:${userId}`;
 }
 
 async function getConvo(userId) {
@@ -66,11 +89,14 @@ async function saveConvo(userId, convo) {
 }
 
 async function isPaused(userId) {
+  if (await redis.get(pauseKey(userId))) return true;
+
+  // Older pause records (made by earlier versions, stored inside the
+  // conversation record) are still honored, so a conversation that was
+  // already paused when this version went live stays paused.
   const convo = await getConvo(userId);
   if (convo.manualPauseAt) {
-    if (Date.now() - convo.manualPauseAt < HANDOFF_PAUSE_EXPIRY_MS) {
-      return true;
-    }
+    if (Date.now() - convo.manualPauseAt < HANDOFF_PAUSE_EXPIRY_MS) return true;
     convo.manualPauseAt = null;
     await saveConvo(userId, convo);
   }
@@ -78,19 +104,22 @@ async function isPaused(userId) {
   return false;
 }
 
+// A team member sent a message in this conversation: the bot steps out for
+// 24 hours, for this one conversation only.
 async function pauseAfterHumanReply(userId) {
-  const convo = await getConvo(userId);
-  // 24 hours, same as every other pause case (handoff, flag, intake,
-  // unsupported attachment) — any team member replying manually inside a
-  // conversation steps the bot out for a full day, not just an hour.
-  convo.pausedUntil = Date.now() + HANDOFF_PAUSE_EXPIRY_MS;
-  await saveConvo(userId, convo);
+  await redis.set(pauseKey(userId), Date.now(), { ex: PAUSE_SECONDS });
 }
 
+// Handoffs, flags, intakes and the /admin endpoints: pause (true) or resume (false).
 async function setManualPause(userId, paused) {
+  if (paused) {
+    await redis.set(pauseKey(userId), Date.now(), { ex: PAUSE_SECONDS });
+    return;
+  }
+  await redis.del(pauseKey(userId));
   const convo = await getConvo(userId);
-  convo.manualPauseAt = paused ? Date.now() : null;
-  if (!paused) convo.pausedUntil = null;
+  convo.manualPauseAt = null;
+  convo.pausedUntil = null;
   await saveConvo(userId, convo);
 }
 
@@ -145,6 +174,29 @@ async function wasSentByBot(messageId) {
   return !!val;
 }
 
+// Remembers, for a few seconds, that the bot itself just sent a message to
+// this person. Together with the message-ID check above, this stops the
+// bot's own message echo from ever being mistaken for a team member.
+async function markBotSend(userId) {
+  await redis.set(botSendKey(userId), 1, { ex: BOT_RECENT_SEND_SECONDS });
+}
+
+async function recentlySentByBot(userId) {
+  return !!(await redis.get(botSendKey(userId)));
+}
+
+// --- Collecting an animal's details ---------------------------------------
+// Photos, videos and other attachments are ignored in normal conversations.
+// They are only wanted while the bot is collecting an animal's details.
+async function setCollecting(userId, on) {
+  if (on) await redis.set(collectingKey(userId), 1, { ex: COLLECTING_SECONDS });
+  else await redis.del(collectingKey(userId));
+}
+
+async function isCollecting(userId) {
+  return !!(await redis.get(collectingKey(userId)));
+}
+
 // --- Incoming message deduplication -------------------------------------
 // Instagram (via Meta) can redeliver the same webhook event if it doesn't
 // get a fast enough response — most commonly right when Render's free tier
@@ -191,6 +243,10 @@ module.exports = {
   getHistory,
   markBotMessageId,
   wasSentByBot,
+  markBotSend,
+  recentlySentByBot,
+  setCollecting,
+  isCollecting,
   addPhotoUrl,
   getPhotoUrls,
   claimIncomingMessage,

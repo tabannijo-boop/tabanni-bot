@@ -9,6 +9,10 @@ const {
   getHistory,
   markBotMessageId,
   wasSentByBot,
+  markBotSend,
+  recentlySentByBot,
+  setCollecting,
+  isCollecting,
   addPhotoUrl,
   getPhotoUrls,
   claimIncomingMessage,
@@ -49,8 +53,13 @@ function splitForInstagram(text, maxLen = INSTAGRAM_MAX_MESSAGE_LENGTH) {
 async function sendInstagramReply(senderId, text) {
   const chunks = splitForInstagram(text);
   for (const chunk of chunks) {
+    // Noted BEFORE sending as well as after: Instagram can echo the message
+    // back before our send call has even returned, and that echo must never
+    // be mistaken for a team member typing.
+    await markBotSend(senderId);
     const sendResult = await sendInstagramMessage(senderId, chunk);
     await markBotMessageId(sendResult?.messageId);
+    await markBotSend(senderId);
   }
 }
 
@@ -90,7 +99,12 @@ function parseNursingMarker(reply) {
   const summary = reply.slice(NURSING_MARKER_START.length, endIdx).trim();
   const outgoing = reply.slice(endIdx + NURSING_MARKER_END.length).trim();
   const phoneMatch = summary.match(/Phone number\s*:\s*(.+)/i);
-  return { phone: phoneMatch ? phoneMatch[1].trim() : '', outgoingText: outgoing };
+  const foundInMatch = summary.match(/Found in\s*:\s*(.+)/i);
+  return {
+    phone: phoneMatch ? phoneMatch[1].trim() : '',
+    foundIn: foundInMatch ? foundInMatch[1].trim() : '',
+    outgoingText: outgoing,
+  };
 }
 
 // Pulls the labeled fields (Name, Type, Age, Gender, Vaccination status,
@@ -136,6 +150,7 @@ function parseIntakeFields(summary) {
 // rather than requiring the marker to be a strict prefix, since the model
 // can occasionally place it elsewhere in the reply.
 function extractOutgoingText(reply) {
+  reply = stripCollectingMarker(reply);
   const intake = parseAllIntakeMarkers(reply);
   if (intake) return intake.outgoingText;
   const nursing = parseNursingMarker(reply);
@@ -227,7 +242,59 @@ Thank you very much for your care.`;
   return `${ar}\n\n${en}`;
 }
 
-// Wraps getClaudeReply with a language check + one automatic retry if the
+// --- Silent marker: the bot is collecting an animal's details -------------------
+// While a surrender/rehoming intake or the nursing-mother flow is going,
+// Claude starts its replies with [[COLLECTING]] (invisible to the person).
+// That switches on "photos and videos are wanted" for this conversation (see
+// isCollecting). As a second way to notice, any reply that asks for photos or
+// videos switches it on too, except the lost & found redirect, which sends
+// photos to the other account instead.
+const COLLECTING_MARKER = '[[COLLECTING]]';
+function stripCollectingMarker(text) {
+  return String(text || '').split(COLLECTING_MARKER).join('').trim();
+}
+function asksForMedia(text) {
+  return /(photos?|pictures?|pics?|videos?|صور|صورة|فيديو)/i.test(text) && !/lostandfound/i.test(text);
+}
+
+// --- Words that must never reach a customer -----------------------------------
+// The prompt bans these Gulf/Iraqi/Egyptian words and tells Claude to use
+// Jordanian ones, but Claude still slips occasionally. This is the guarantee
+// behind the rule: any banned word in an Arabic reply is swapped for its
+// Jordanian equivalent right before the message is sent. (Only whole words are
+// changed. "زين" and "دي" are left to the prompt because they are also common
+// names, and replacing them could change an animal's name.)
+const ARABIC_LETTERS = '\u0621-\u0652';
+const BANNED_ARABIC_WORDS = {
+  'شنو': 'شو',
+  'الحين': 'هلأ',
+  'وش': 'شو',
+  'وايد': 'كتير',
+  'ابغى': 'بدي',
+  'كذا': 'هيك',
+  'زغار': 'صغار',
+  'تحطوهن': 'تحطوهم',
+  'هلق': 'هلأ',
+  'هسع': 'هسا',
+};
+// A one-letter prefix (و ف ب ل, as in "وابغى" = "and I want") is also caught
+// for the words where that cannot clash with a real word.
+const WORDS_THAT_MAY_HAVE_A_PREFIX = new Set(['شنو', 'ابغى', 'وايد']);
+const BANNED_WORD_PATTERNS = Object.entries(BANNED_ARABIC_WORDS).map(([bad, good]) => {
+  const prefix = WORDS_THAT_MAY_HAVE_A_PREFIX.has(bad) ? '([وفبل]?)' : '()';
+  return [new RegExp(`(?<![${ARABIC_LETTERS}])${prefix}${bad}(?![${ARABIC_LETTERS}])`, 'g'), `$1${good}`];
+});
+function fixArabicWording(text) {
+  if (!/[\u0600-\u06FF]/.test(text)) return text;
+  let out = text;
+  // Asking someone to confirm a phone number: the right wording is "هاد رقم حضرتكم؟".
+  out = out.replace(/ها[يد]\s+رقمك(\s+صح)?\s*[؟?]/g, 'هاد رقم حضرتكم؟');
+  out = out.replace(new RegExp(`(?<![${ARABIC_LETTERS}])رقمك(?![${ARABIC_LETTERS}])`, 'g'), 'رقمكم');
+  for (const [pattern, replacement] of BANNED_WORD_PATTERNS) out = out.replace(pattern, replacement);
+  if (out !== text) console.log('✏️ Corrected the wording of an Arabic reply before sending it.');
+  return out;
+}
+
 // --- Ages must have a unit --------------------------------------------------
 // "5" could mean five years or five months, and the story card prints the age
 // as a tag, so a bare number must never get through. The prompt tells Claude
@@ -259,7 +326,9 @@ function buildAgeClarification(lang, fieldsList) {
   return `${ar}\n\n${en}`;
 }
 
-// Wraps getClaudeReply with a language check + one automatic retry if the// mismatches — a prompt instruction alone was not reliable enough on its
+// Wraps getClaudeReply with a language check + one automatic retry if the
+// reply came back in the wrong language. This is the real fix for language
+// mismatches — a prompt instruction alone was not reliable enough on its
 // own, this actually verifies the output before it gets sent.
 //
 // baseNote (optional): extra context included in EVERY call for this turn,
@@ -300,7 +369,7 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
 app.post('/api/test-chat', async (req, res) => {
   try {
     const history = Array.isArray(req.body.history) ? req.body.history : [];
-    const reply = await getVerifiedClaudeReply(history);
+    const reply = stripCollectingMarker(await getVerifiedClaudeReply(history));
     const HANDOFF_MARKER = '[[HANDOFF]]';
     const FLAG_MARKER = '[[FLAG]]';
     let outgoingText = reply;
@@ -308,7 +377,7 @@ app.post('/api/test-chat', async (req, res) => {
     let intake = false;
     const lastUserMsg = [...history].reverse().find(m => m.role === 'user');
 
-       const intakeParsed = parseAllIntakeMarkers(reply);
+    const intakeParsed = parseAllIntakeMarkers(reply);
     if (intakeParsed) {
       const ageQuestion = buildAgeClarification(languageOfConversation(history), intakeParsed.summaries.map(parseIntakeFields));
       if (ageQuestion) {
@@ -343,7 +412,7 @@ app.post('/api/test-chat', async (req, res) => {
       );
       await sendTelegramSpacer();
     }
-    res.json({ reply: outgoingText, handoff, intake });
+    res.json({ reply: fixArabicWording(outgoingText), handoff, intake });
   } catch (err) {
     console.error('Test chat error:', err);
     res.status(500).json({ reply: "Something went wrong — check server logs.", handoff: false });
@@ -477,7 +546,14 @@ async function addToPendingTurn(senderId, { text, mediaItems }) {
   const hasText = !!(text && text.trim());
   const hasMedia = !!(mediaItems && mediaItems.length);
 
-  if (hasText) {
+  // A phone number can arrive twice (once as typed text and once from its
+  // preview card). The same number twice in a row is only counted once.
+  const digitsOnly = (x) => String(x).replace(/\D/g, '');
+  const isPhoneLike = (x) => /^[\d\s+\-().]+$/.test(x) && digitsOnly(x).length >= 7;
+  const lastText = pending.texts[pending.texts.length - 1];
+  const duplicateNumber = hasText && lastText && isPhoneLike(text.trim()) && isPhoneLike(lastText) && digitsOnly(text) === digitsOnly(lastText);
+
+  if (hasText && !duplicateNumber) {
     pending.texts.push(text.trim());
     await addUserMessage(senderId, text.trim()); // saved right away, see note above
   }
@@ -539,41 +615,45 @@ async function flushPendingTurn(senderId) {
   await processTurn(senderId, parts.join('\n'), displayName);
 }
 
-// Pulls a usable message out of a link-preview ("fallback") attachment.
-// Prefers what the person actually typed. If they typed nothing, looks for a
-// phone number in the preview's title or link (Instagram turns numbers into
-// "tel:" links), and failing that uses the preview's own title or link.
-// Returns null if there is nothing usable, so the caller can fall back to
-// asking the person to type their message.
-function recoverTextFromLinkPreview(typedText, previews) {
-  if (typedText && typedText.trim()) return typedText.trim();
-
-  const candidates = [];
+// A phone number sent from Instagram can arrive as a small "link preview"
+// card (a "fallback" attachment) instead of, or as well as, plain text. When
+// the person typed no text, this reads the number out of that card so a
+// phone number is never lost. It does not use anything else from the card
+// (web page titles, links and so on): attachments are otherwise ignored.
+// Returns the number, or null.
+function recoverPhoneFromLinkPreview(previews) {
   for (const p of previews) {
     const url = p?.payload?.url || p?.url || '';
     const title = p?.payload?.title || p?.title || '';
     let decodedUrl = url;
     try { decodedUrl = decodeURIComponent(url); } catch (e) { /* keep raw */ }
-    candidates.push(decodedUrl.replace(/^tel:/i, ''), title);
-  }
-
-  // A phone number: 7 to 15 digits, optionally with +, spaces, dashes, dots, brackets.
-  for (const c of candidates) {
-    const m = String(c).match(/\+?\d[\d\s\-().]{5,}\d/);
-    if (m) {
-      const digits = m[0].replace(/\D/g, '');
-      if (digits.length >= 7 && digits.length <= 15) return m[0].trim();
+    for (const candidate of [decodedUrl.replace(/^tel:/i, ''), title]) {
+      const m = String(candidate).match(/\+?\d[\d\s\-().]{5,}\d/);
+      if (m) {
+        const digits = m[0].replace(/\D/g, '');
+        if (digits.length >= 7 && digits.length <= 15) return m[0].trim();
+      }
     }
   }
-
-  const fallbackText = candidates.map((c) => String(c).trim()).find(Boolean);
-  return fallbackText || null;
+  return null;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const echoGraceMs = () => secondsFromEnv('ECHO_GRACE_SECONDS', 2);
+
 async function handleMessagingEvent(event) {
-  const senderId = event.sender?.id;
   const message = event.message;
-  if (!message || !senderId) return;
+  if (!message) return;
+
+  // WHO IS THE CONVERSATION WITH? Normally the sender. But when the message
+  // is an "echo" (a message sent FROM your account, by the bot or by a team
+  // member in the Instagram app), Instagram reports YOUR account as the
+  // sender and the customer as the recipient. Using the sender here made the
+  // bot "pause" its own account instead of the customer's conversation, so
+  // a team member joining a chat never stopped the bot.
+  const isEcho = !!message.is_echo;
+  const senderId = isEcho ? event.recipient?.id : event.sender?.id;
+  if (!senderId) return;
 
   // --- Deduplication: Instagram/Meta can redeliver the same webhook event ---
   // (most commonly when Render's free tier is slow to wake up from sleep and
@@ -593,10 +673,23 @@ async function handleMessagingEvent(event) {
   // this specific message ID is one the bot just sent itself. If so, ignore
   // it silently. If it's an echo the bot doesn't recognize, a human really
   // did send it manually, so pause the bot on this conversation.
-  if (message.is_echo) {
+  if (isEcho) {
+    // 1) The bot's own messages are recognized by their message ID.
     if (await wasSentByBot(message.mid)) return;
+    // 2) The bot notes "I am sending to this person" BEFORE it sends, so an
+    //    echo that arrives within about 3 seconds of the bot's own message
+    //    is the bot's own message, even if its ID is not recorded yet.
+    if (await recentlySentByBot(senderId)) {
+      console.log(`Echo ${message.mid} to ${senderId} came right after the bot's own message, treating it as the bot's own.`);
+      return;
+    }
+    // 3) Last check: if Instagram was slow to confirm a send, its ID may be
+    //    recorded a moment later. Wait briefly and look once more.
+    await sleep(echoGraceMs());
+    if (await wasSentByBot(message.mid)) return;
+    // Otherwise a person sent it from the Instagram app.
     await pauseAfterHumanReply(senderId);
-    console.log(`Detected manual reply to ${senderId} — pausing bot for this conversation.`);
+    console.log(`👤 A team member replied to ${senderId} — bot paused for 24 hours on this conversation.`);
     return;
   }
 
@@ -618,54 +711,36 @@ async function handleMessagingEvent(event) {
   }
 
   let userText = message.text;
-  const mediaAttachments = Array.isArray(message.attachments)
-    ? message.attachments.filter((a) => a.type === 'image' || a.type === 'video')
-    : [];
-  const otherAttachments = Array.isArray(message.attachments)
-    ? message.attachments.filter((a) => a.type !== 'image' && a.type !== 'video')
-    : [];
-  const hasAttachments = mediaAttachments.length > 0;
+  const hasTypedText = () => !!(userText && userText.trim());
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  const mediaAttachments = attachments.filter((a) => a.type === 'image' || a.type === 'video');
+  const voiceNoteAttachments = attachments.filter((a) => a.type === 'audio');
+  // Everything else: phone-number cards, shared posts and reels, story
+  // mentions, and any other kind of attachment.
+  const otherAttachments = attachments.filter((a) => a.type !== 'image' && a.type !== 'video' && a.type !== 'audio');
 
-  // Log what kind of non-photo attachment arrived (type only, never the
-  // contents) so any new kind of attachment is easy to diagnose in Render.
+  // ATTACHMENTS ARE IGNORED, QUIETLY. The bot does not reply to them, does
+  // not pause, and does not alert the team. If the person typed anything
+  // together with the attachment, that text is answered as normal.
+  //   - Photos and videos are only used while the bot is collecting an
+  //     animal's details (see isCollecting below); otherwise ignored.
+  //   - Phone-number cards, shared posts, reels, story mentions: always ignored.
+  // (The type is logged, never the contents, to make any new kind easy to spot.)
   if (otherAttachments.length > 0) {
-    console.log(`📎 Non-media attachment(s) from ${senderId}: ${JSON.stringify(otherAttachments.map((a) => ({ type: a.type, hasUrl: !!a?.payload?.url, hasTitle: !!a?.payload?.title })))}${userText ? ' (message also has text)' : ''}`);
+    console.log(`📎 Ignoring attachment(s) from ${senderId}: ${JSON.stringify(otherAttachments.map((a) => a.type))}${hasTypedText() ? ' (answering the typed text only)' : ''}`);
   }
 
-  // LINK PREVIEWS ("fallback" attachments). When someone sends a phone
-  // number, a web address, or anything else Instagram turns into a tappable
-  // link, Instagram wraps it in a little preview card and sends it as a
-  // "fallback" attachment, usually with the text they actually typed still
-  // in message.text. That is not a voice note and not a story/post share, so
-  // it must not trigger the "can't receive this" reply or pause the chat.
-  // The typed text (or, if there is none, the number/link found in the
-  // preview) is used as the message instead.
-  const linkPreviewAttachments = otherAttachments.filter((a) => a.type === 'fallback');
-  const otherNonPreviewAttachments = otherAttachments.filter((a) => a.type !== 'fallback');
-  let linkPreviewHandledAsText = false;
-  if (!hasAttachments && linkPreviewAttachments.length > 0 && otherNonPreviewAttachments.length === 0) {
-    const recovered = recoverTextFromLinkPreview(userText, linkPreviewAttachments);
-    if (recovered) {
-      userText = recovered;
-      linkPreviewHandledAsText = true;
-    }
+  // The one exception: a phone number that arrives ONLY inside its card, with
+  // no typed text, is read out of the card so the number is not lost.
+  if (mediaAttachments.length === 0 && !hasTypedText()) {
+    const phone = recoverPhoneFromLinkPreview(otherAttachments.filter((a) => a.type === 'fallback'));
+    if (phone) userText = phone;
   }
 
-  // Voice notes specifically: the bot cannot transcribe audio, but this is
-  // fully self-resolvable by just asking the person to type instead, so no
-  // human needs to get involved. No pause, no Telegram alert, bot stays
-  // fully active and ready for their next (typed) message.
-  const voiceNoteAttachments = otherAttachments.filter((a) => a.type === 'audio');
-  // "fallback" (or anything else with no usable payload URL) is what Meta
-  // sends for an unsupported share it could not represent properly — this
-  // includes cases like a failed contact/phone-number share. There is
-  // nothing here worth pausing the conversation or alerting the team
-  // over, so it is handled the same gentle way as a voice note: just ask
-  // the person to type it normally.
-  const emptyFallbackAttachments = linkPreviewHandledAsText ? [] : otherAttachments.filter((a) => a.type !== 'audio' && !a?.payload?.url);
-  const trulyUnsupportedAttachments = linkPreviewHandledAsText ? [] : otherAttachments.filter((a) => a.type !== 'audio' && a?.payload?.url);
-
-  if (!hasAttachments && voiceNoteAttachments.length > 0) {
+  // Voice notes cannot be understood, so the person is asked to type, as
+  // before. (Not while a team member has taken over the conversation.)
+  if (mediaAttachments.length === 0 && voiceNoteAttachments.length > 0 && !hasTypedText()) {
+    if (await isPaused(senderId)) return;
     await flushPendingTurnNow(senderId);
     const askToTypeText = 'عذراً، ما نقدر نستمع للرسائل الصوتية لأن هذا بوت ذكاء اصطناعي. ممكن تكتبولنا اللي حابين تحكوه بالنص لو سمحتوا؟\n\nSorry, we are not able to listen to voice notes as this is an AI chatbot. Could you please write down what you would like to say instead?';
     await sendInstagramReply(senderId, askToTypeText);
@@ -673,49 +748,26 @@ async function handleMessagingEvent(event) {
     return;
   }
 
-  if (!hasAttachments && emptyFallbackAttachments.length > 0) {
-    await flushPendingTurnNow(senderId);
-    const askToTypeText = 'عذراً، ما قدرنا نستقبل هاد النوع من الرسائل. ممكن تكتبولنا اللي حابين تحكوه بالنص لو سمحتوا؟\n\nSorry, we were not able to receive that type of message. Could you please write it out as text instead?';
-    await sendInstagramReply(senderId, askToTypeText);
-    console.log(`📎 Empty/fallback attachment (e.g. failed share) from ${senderId} — asked them to type instead, bot stays active.`);
-    return;
-  }
-
-  // Story mentions, post/reel shares, or any other attachment type we
-  // genuinely cannot process (there is nothing to "type instead" for a
-  // story mention): goes to a volunteer with a general acknowledgment.
-  if (!hasAttachments && trulyUnsupportedAttachments.length > 0) {
-    await flushPendingTurnNow(senderId);
-    const ackText = 'شكراً لرسالتكم سيتم الرد عليكم من قبل احد متطوعين تبني بأسرع وقت ممكن\n\nThank you for your message. One of tabanni\'s volunteers will get back to you as soon as possible.';
-    await sendInstagramReply(senderId, ackText);
-    await setManualPause(senderId, true);
-    console.log(`📎 Unsupported attachment from ${senderId} — bot paused, team alerted.`);
-    const profile = await getInstagramUserProfile(senderId);
-    const displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
-    await queueTelegramCall(async () => {
-      await sendTelegramNotificationWithButton(
-        `📎 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nSent a story mention, share, or other unsupported content${userText ? `\nMessage text: "${userText}"` : ''}\n\nOpen Instagram DMs to review and reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`,
-        'toggle_handled',
-        '☐ Not handled yet'
-      );
-      await sendTelegramSpacer();
-    });
-    return;
-  }
-
-  if (hasAttachments) {
-    // Photos/videos: collect them (and any caption) and wait for more.
-    const mediaItems = [];
-    for (const att of mediaAttachments) {
-      const attUrl = att?.payload?.url;
-      if (!attUrl) continue;
-      mediaItems.push({ url: attUrl, type: att.type });
+  if (mediaAttachments.length > 0) {
+    if (await isCollecting(senderId)) {
+      // The bot is collecting this animal's details: keep the photos/videos.
+      const mediaItems = [];
+      for (const att of mediaAttachments) {
+        const attUrl = att?.payload?.url;
+        if (!attUrl) continue;
+        mediaItems.push({ url: attUrl, type: att.type });
+      }
+      await addToPendingTurn(senderId, { text: userText, mediaItems });
+      return;
     }
-    await addToPendingTurn(senderId, { text: userText, mediaItems });
+    // No intake in progress: photos and videos are ignored (answer any caption).
+    console.log(`🖼️ Ignoring ${mediaAttachments.length} photo/video(s) from ${senderId}: no intake in progress.`);
+    if (!hasTypedText()) return;
+    await addToPendingTurn(senderId, { text: userText });
     return;
   }
 
-  if (!userText) return; // nothing to respond to (e.g. a sticker with no attachments array)
+  if (!hasTypedText()) return; // nothing to respond to
 
   // A text message: collect it and wait for more before replying.
   await addToPendingTurn(senderId, { text: userText });
@@ -756,7 +808,9 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     ? 'CONTEXT NOTE: the person has either never messaged before, or has been silent for 7 or more days since their last message. Treat this reply as a fresh conversation start: include the full opening/disclosure message pattern (mentioning this is tabanni\'s AI agent, plus the trial-phase note), the same as you would for a brand new conversation, even if the message history below shows earlier messages.'
     : '';
 
-   const reply = await getVerifiedClaudeReply(history, greetingNote);
+  const rawReply = await getVerifiedClaudeReply(history, greetingNote);
+  const wantsCollecting = rawReply.includes(COLLECTING_MARKER);
+  const reply = stripCollectingMarker(rawReply);
 
   // Safeguard: never complete an intake while an age is only a number. Ask
   // for the unit instead, and remember the question (not the held-back
@@ -767,12 +821,14 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     if (ageQuestion) {
       await addAssistantMessage(senderId, ageQuestion);
       await sendInstagramReply(senderId, ageQuestion);
+      await setCollecting(senderId, true); // the intake is still going
       console.log(`❓ Intake for ${senderId} held back: an age had no unit (years or months), asked the person.`);
       return;
     }
   }
 
-  await addAssistantMessage(senderId, reply);
+  // The stored copy keeps the silent marker, so Claude keeps using it on later turns.
+  await addAssistantMessage(senderId, rawReply);
 
   // --- Human handoff: did Claude flag this as something it can't safely ---
   // answer (e.g. real-time animal availability)? If so, strip the silent
@@ -817,7 +873,17 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     outgoingText = reply.split(FLAG_MARKER).join('').trim();
   }
 
+  outgoingText = fixArabicWording(outgoingText);
   await sendInstagramReply(senderId, outgoingText);
+
+  // Photos and videos are wanted only while an animal's details are being
+  // collected. Switch that on when the bot says so (or asks for photos), and
+  // off once the intake or nursing alert is complete.
+  if (intakeSummaries || nursingInfo) {
+    await setCollecting(senderId, false);
+  } else if (!needsHandoff && !needsFlag && (wantsCollecting || asksForMedia(outgoingText))) {
+    await setCollecting(senderId, true);
+  }
 
   const getDisplayName = async () => {
     if (precomputedDisplayName) return precomputedDisplayName;
@@ -949,14 +1015,14 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     await queueTelegramCall(async () => {
       if (latestPhoto) {
         await sendTelegramAlertPhoto(
-          `🍼 Nursing Mom Alert\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}`,
+          `🍼 Nursing Mom Alert\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}\nFound in: ${nursingInfo.foundIn || 'not said'}`,
           latestPhoto,
           'toggle_nursing',
           '☐ Not handled yet'
         );
       } else {
         await sendTelegramNotificationWithButton(
-          `🍼 Nursing Mom Alert (no photo received)\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}`,
+          `🍼 Nursing Mom Alert (no photo received)\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}\nFound in: ${nursingInfo.foundIn || 'not said'}`,
           'toggle_handled',
           '☐ Not handled yet'
         );

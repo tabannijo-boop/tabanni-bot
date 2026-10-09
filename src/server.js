@@ -965,3 +965,152 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     console.log(`🚩 Conversation with ${senderId} flagged — bot paused.`);
 
     const displayName = await getDisplayName();
+
+    await queueTelegramCall(async () => {
+      await sendTelegramNotificationWithButton(
+        `🚩 tabanni bot flagged a conversation!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nThe bot is paused on this conversation until you resume it (see README for /admin/resume).`,
+        'toggle_handled',
+        '☐ Not handled yet'
+      );
+      await sendTelegramSpacer();
+    });
+  } else if (intakeSummaries) {
+    // An intake is now treated as a full handoff case too: pause for 24
+    // hours the same way HANDOFF/FLAG do, since the team needs to review
+    // and post the story card(s) themselves. Everything else about the
+    // intake (photos, story card, checkbox) stays exactly the same, now
+    // done once per pet when there is more than one in the same intake.
+    await setManualPause(senderId, true);
+    console.log(`🆕 Adoption intake ready for ${senderId} — ${intakeSummaries.length} pet(s). Bot paused for 24h.`);
+
+    const displayName = await getDisplayName();
+    const allPhotoUrls = await getPhotoUrls(senderId);
+
+    // PHOTO ATTRIBUTION: with multiple pets in one intake, the pooled
+    // photos need to be split correctly per animal. Each pet's summary
+    // reports how many of the photos belong to it (see the "Photo count"
+    // field in knowledge.js's multi-pet instructions), and pets are
+    // collected and photographed in order, so consuming that many photos
+    // per pet, in sequence, from the front of the pool gives the right
+    // slice for each one. Falls back to giving a single pet all the
+    // pooled photos when there is only one pet (the normal case).
+    let photoCursor = 0;
+    const perPetResults = [];
+    for (let i = 0; i < intakeSummaries.length; i++) {
+      const summary = intakeSummaries[i];
+      let fields = null;
+      let imageBuffer = null;
+      let imageGenError = null;
+      try {
+        fields = parseIntakeFields(summary);
+        let photoUrls;
+        if (intakeSummaries.length === 1) {
+          photoUrls = allPhotoUrls.slice(-8); // single pet: recent photos; the card drops duplicates and uses up to 4 distinct ones
+        } else {
+          const count = fields.photoCount != null ? fields.photoCount : 0;
+          photoUrls = allPhotoUrls.slice(photoCursor, photoCursor + count);
+          photoCursor += count;
+        }
+        if (photoUrls.length > 0 && fields.name) {
+          imageBuffer = await generateStoryImage({
+            photoUrls,
+            name: fields.name,
+            animalType: fields.animalType,
+            age: fields.age,
+            gender: fields.gender,
+            vaccination: fields.vaccination,
+            story: fields.story,
+            phone: fields.phone,
+          });
+        } else {
+          console.log(`Skipped story image for ${senderId} (pet ${i + 1}/${intakeSummaries.length}): missing photos or name.`);
+        }
+      } catch (err) {
+        console.error(`Story image generation failed for pet ${i + 1}/${intakeSummaries.length}:`, err);
+        imageGenError = err;
+      }
+      perPetResults.push({ summary, fields, imageBuffer, imageGenError });
+    }
+
+    await queueTelegramCall(async () => {
+      for (let i = 0; i < perPetResults.length; i++) {
+        const { summary, fields, imageBuffer, imageGenError } = perPetResults[i];
+        const petLabel = perPetResults.length > 1 ? ` (pet ${i + 1} of ${perPetResults.length})` : '';
+        await sendTelegramNotification(
+          `🐾🆕 New adoption intake ready to post!${petLabel}\n\nFrom: ${displayName}\n\n${summary}`
+        );
+        if (imageBuffer && fields) {
+          await sendTelegramStoryImage(
+            `🖼️ Ready-to-post story card for ${fields.name}${petLabel} — save and add to Instagram Stories. Tap the checkbox below once it is posted.`,
+            imageBuffer,
+            `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
+          );
+        } else if (imageGenError) {
+          await sendTelegramNotificationWithButton(
+            `⚠️ Could not auto-generate the story image for the intake above${petLabel} — please build it manually this time.`,
+            'toggle_handled',
+            '☐ Not handled yet'
+          );
+        }
+      }
+      await sendTelegramSpacer();
+    });
+
+    console.log(`✅ Adoption intake (${intakeSummaries.length} pet(s)) fully sent to Telegram for ${senderId} — bot paused 24h.`);
+  } else if (nursingInfo) {
+    console.log(`🍼 Nursing mother case flagged for ${senderId}.`);
+
+    const displayName = await getDisplayName();
+    const allPhotoUrls = await getPhotoUrls(senderId);
+    const latestPhoto = allPhotoUrls[allPhotoUrls.length - 1];
+
+    await queueTelegramCall(async () => {
+      if (latestPhoto) {
+        await sendTelegramAlertPhoto(
+          `🍼 Nursing Mom Alert\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}\nFound in: ${nursingInfo.foundIn || 'not said'}`,
+          latestPhoto,
+          'toggle_nursing',
+          '☐ Not handled yet'
+        );
+      } else {
+        await sendTelegramNotificationWithButton(
+          `🍼 Nursing Mom Alert (no photo received)\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}\nFound in: ${nursingInfo.foundIn || 'not said'}`,
+          'toggle_handled',
+          '☐ Not handled yet'
+        );
+      }
+      await sendTelegramSpacer();
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3) Admin controls — pause/resume a conversation manually. This is meant to
+//    be called from a small internal tool or even just curl/Postman for now;
+//    wire up a real dashboard button later if you want.
+// ---------------------------------------------------------------------------
+function checkAdminSecret(req, res, next) {
+  const provided = req.headers['x-admin-secret'];
+  if (provided !== process.env.ADMIN_SECRET) return res.sendStatus(401);
+  next();
+}
+
+app.post('/admin/pause', checkAdminSecret, async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  await setManualPause(userId, true);
+  res.json({ ok: true, userId, paused: true });
+});
+
+app.post('/admin/resume', checkAdminSecret, async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  await setManualPause(userId, false);
+  res.json({ ok: true, userId, paused: false });
+});
+
+// Simple health check for your hosting provider.
+app.get('/', (req, res) => res.send('tabanni bot is running 🐾'));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`tabanni bot listening on port ${PORT}`));

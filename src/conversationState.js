@@ -32,13 +32,10 @@ const HANDOFF_PAUSE_EXPIRY_MS = PAUSE_SECONDS * 1000; // used only for older pau
 // 7 days is far longer than any real back-and-forth should take.
 const STATE_TTL_SECONDS = 7 * 24 * 60 * 60;
 
-// How long a conversation can go quiet before the next message should get
-// the full opening/disclosure message again (the "you are talking to
-// tabanni's AI agent" note). Deliberately its own explicit value, separate
-// from STATE_TTL_SECONDS above, so the two can be tuned independently —
-// one controls how long we remember the conversation at all, this one
-// controls when a returning person is treated as "starting fresh" again.
-const GREETING_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
+// How long a person can stay silent before their next message gets the
+// welcome message again (see claimWelcome below).
+const WELCOME_REFRESH_SECONDS = 7 * 24 * 60 * 60;
+const WELCOME_REFRESH_MS = WELCOME_REFRESH_SECONDS * 1000;
 
 // How long we remember a bot-sent message ID, to recognize its own echo
 // (see wasSentByBot below). Only needs to cover the few seconds it takes
@@ -76,6 +73,9 @@ function collectingKey(userId) {
 }
 function botSendKey(userId) {
   return `tabanni:botsend:${userId}`;
+}
+function welcomeKey(userId) {
+  return `tabanni:welcome:${userId}`;
 }
 
 async function getConvo(userId) {
@@ -217,21 +217,27 @@ async function claimIncomingMessage(messageId) {
   return result !== null; // non-null means we successfully claimed it (first time seeing it)
 }
 
-// --- Greeting refresh -----------------------------------------------------
-// Call once per incoming turn, before generating a reply. Returns true if
-// this is either a brand new conversation, or the person has been silent
-// for 7+ days since their last message — in both cases the reply should
-// include the full opening/disclosure message again, since Claude only
-// sees the conversation TEXT, not real timestamps, and has no way to know
-// time has passed otherwise. Also updates the stored last-message time to
-// now, regardless of the result.
-async function checkNeedsGreetingRefresh(userId) {
+// --- Welcome message -------------------------------------------------------
+// The bot sends its welcome message the moment a person first writes, and
+// again only if they have been silent for 7 days. This answers "should this
+// message get the welcome?" and is done in ONE atomic step (Redis SETNX), so
+// two messages arriving at the same instant can never both get one.
+//
+// Every message from a person pushes their 7 days forward, so someone who
+// keeps chatting is never welcomed twice.
+async function claimWelcome(userId) {
+  const claimed = await redis.set(welcomeKey(userId), Date.now(), { ex: WELCOME_REFRESH_SECONDS, nx: true });
+  if (claimed === null) {
+    await redis.expire(welcomeKey(userId), WELCOME_REFRESH_SECONDS); // active person: restart their 7 days
+    return false;
+  }
+  // The first time this person is seen by this version. Conversations that
+  // were already going before the welcome message existed were greeted by
+  // the old system, so someone who wrote within the last 7 days is not
+  // welcomed again.
   const convo = await getConvo(userId);
-  const previous = convo.lastMessageAt;
-  const needsRefresh = !previous || (Date.now() - previous >= GREETING_REFRESH_MS);
-  convo.lastMessageAt = Date.now();
-  await saveConvo(userId, convo);
-  return needsRefresh;
+  if (convo.lastMessageAt && Date.now() - convo.lastMessageAt < WELCOME_REFRESH_MS) return false;
+  return true;
 }
 
 module.exports = {
@@ -250,5 +256,5 @@ module.exports = {
   addPhotoUrl,
   getPhotoUrls,
   claimIncomingMessage,
-  checkNeedsGreetingRefresh,
+  claimWelcome,
 };

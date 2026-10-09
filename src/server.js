@@ -16,7 +16,7 @@ const {
   addPhotoUrl,
   getPhotoUrls,
   claimIncomingMessage,
-  checkNeedsGreetingRefresh,
+  claimWelcome,
 } = require('./conversationState');
 const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, queueTelegramCall, sendTelegramAlertPhoto, sendTelegramNotificationWithButton } = require('./apis');
 const { generateStoryImage } = require('./storyTemplate');
@@ -61,6 +61,62 @@ async function sendInstagramReply(senderId, text) {
     await markBotMessageId(sendResult?.messageId);
     await markBotSend(senderId);
   }
+}
+
+// --- The welcome message ------------------------------------------------------
+// Sent by the bot, word for word, the moment a person first writes (and again
+// after 7 days of silence). It replaces the automatic reply that Instagram
+// itself used to send, which has been switched off. It is fixed text on
+// purpose: it carries the partner clinics' phone numbers, which must never be
+// changed or dropped, and it must reach the person immediately, not after the
+// bot's short wait before answering.
+//
+// To change the welcome, edit the two texts below. Nothing else needs to change.
+const WELCOME_EN = `Hello, thank you for contacting tabanni. You are talking to tabanni's AI agent. We will reply as soon as possible.
+
+If an animal is very sick, injured, poisoned, abused, or was run over, please contact one of our partner clinics directly so the animal can be seen as soon as possible, and mention that tabanni referred you:
+Pets Corner (Dr Mohammad Bakhit), Wadi Saqra: 07 9835 5477
+First Pet, Abdoun: 07 9501 3824
+First Pet, Swefieh: 0797177835
+Petpark (Dr Rakan), Swefieh: 065866557
+
+For lost or found pets: contact @tabanni.jordan.lostandfound
+
+Please note, we are currently in a trial phase while testing this chatbot. If you notice any errors, please know this is part of the trial period. If you would like to report anything about the chatbot, please email info@tabanni.org with the subject CHATBOT error report. Thank you.`;
+
+const WELCOME_AR = `مرحبًا، شكرًا لتواصلكم مع تبنّي. أنتم تتحدثون مع مساعد تبني الذكي الاصطناعي. سنرد في أقرب وقت ممكن.
+
+إذا كان الحيوان مريضًا جدًا، أو مصابًا، أو متسممًا، أو تعرض للإساءة أو الدهس، لطفاً تواصلوا مباشرة مع إحدى عياداتنا الشريكة ليتم فحصه بأسرع وقت، وقولوا انكم أخدتوا الرقم من تبني:
+Pets Corner (د. محمد بخيت)، وادي صقرة: 07 9835 5477
+First Pet، عبدون: 07 9501 3824
+First Pet، صويفية: 0797177835
+Petpark (د. ركان)، صويفية: 065866557
+
+للإبلاغ عن حيوان مفقود أو عثر عليه: @tabanni.jordan.lostandfound
+
+يرجى العلم اننا حاليا بمرحلة تجريبية انتقالية لتجربة البوت، فاذا صادفتكم اي أخطاء يرجى العلم انها جزء من هذه المرحلة التجريبية. اذا لاحظتوا اي شي حابين تبلغونا عنه بخصوص البوت، ممكن ترسلولنا ايميل ع info@tabanni.org بعنوان CHATBOT error report. شكرًا.`;
+
+// The welcome goes out in the language the person wrote in. If their first
+// message has no words to go by (only a photo, a shared post, an emoji), both
+// languages are sent.
+function welcomeMessagesFor(firstText) {
+  const lang = detectLanguage(stripAttachmentNotes(firstText));
+  if (lang === 'ar') return [WELCOME_AR];
+  if (lang === 'en') return [WELCOME_EN];
+  return [WELCOME_EN, WELCOME_AR];
+}
+
+// Sends the welcome if this is the person's first message (or their first
+// after 7 days of silence). Not sent while a team member has taken over the
+// conversation. SEND_WELCOME_MESSAGE=false in Render switches it off.
+async function sendWelcomeIfFirstContact(senderId, firstText) {
+  if (process.env.SEND_WELCOME_MESSAGE === 'false') return;
+  if (await isPaused(senderId)) return;
+  if (!(await claimWelcome(senderId))) return;
+  for (const text of welcomeMessagesFor(firstText)) {
+    await sendInstagramReply(senderId, text);
+  }
+  console.log(`👋 Sent the welcome message to ${senderId}.`);
 }
 
 // The [[INTAKE]] marker is different from [[HANDOFF]] and [[FLAG]]: it wraps
@@ -332,9 +388,8 @@ function buildAgeClarification(lang, fieldsList) {
 // own, this actually verifies the output before it gets sent.
 //
 // baseNote (optional): extra context included in EVERY call for this turn,
-// not just a retry — used for the 7-day greeting refresh below, so Claude
-// knows to treat this as a fresh conversation start even though the stored
-// history might still contain older messages.
+// not just a retry. (Currently unused: the opening message is now sent by
+// the system itself, see sendWelcomeIfFirstContact.)
 async function getVerifiedClaudeReply(history, baseNote = '') {
   history = dropLeadingBotMessages(history);
   const reply = await getClaudeReply(history, baseNote);
@@ -710,6 +765,11 @@ async function handleMessagingEvent(event) {
     }
   }
 
+  // A real message from a person: welcome them first, if this is their first
+  // message (or their first after 7 days of silence). This goes out at once,
+  // before the short wait the bot takes to gather and answer their message.
+  await sendWelcomeIfFirstContact(senderId, message.text);
+
   let userText = message.text;
   const hasTypedText = () => !!(userText && userText.trim());
   const attachments = Array.isArray(message.attachments) ? message.attachments : [];
@@ -773,12 +833,11 @@ async function handleMessagingEvent(event) {
   await addToPendingTurn(senderId, { text: userText });
 }
 
-// Shared logic for handling one "turn": add the message to history, ask
-// Claude for a reply (with a language check + retry), act on any
-// [[HANDOFF]] / [[FLAG]] / [[INTAKE]] / [[NURSING]] marker, send the
-// reply, and fire the right Telegram notification. Used by both a normal
-// text message and a flushed media batch, so behavior is identical either
-// way.
+// Shared logic for handling one "turn": ask Claude for a reply (with a
+// language check + retry), act on any [[HANDOFF]] / [[FLAG]] / [[INTAKE]] /
+// [[NURSING]] marker, send the reply, and fire the right Telegram
+// notification. Used by both a normal text message and a flushed media
+// batch, so behavior is identical either way.
 async function processTurn(senderId, effectiveText, precomputedDisplayName) {
   // The person's message(s) were already saved to the history when they
   // arrived (see addToPendingTurn / flushPendingTurn).
@@ -797,18 +856,11 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     return;
   }
 
-  // If this is a brand new conversation, or the person has been silent for
-  // 7+ days, treat this reply as worth the full opening/disclosure message
-  // again (the "you are talking to tabanni's AI agent" note), even though
-  // the stored history might still technically contain older messages.
-  // Claude only sees the conversation TEXT, not real timestamps, so it has
-  // no way to know time has passed unless told explicitly here.
-  const needsGreetingRefresh = await checkNeedsGreetingRefresh(senderId);
-  const greetingNote = needsGreetingRefresh
-    ? 'CONTEXT NOTE: the person has either never messaged before, or has been silent for 7 or more days since their last message. Treat this reply as a fresh conversation start: include the full opening/disclosure message pattern (mentioning this is tabanni\'s AI agent, plus the trial-phase note), the same as you would for a brand new conversation, even if the message history below shows earlier messages.'
-    : '';
-
-  const rawReply = await getVerifiedClaudeReply(history, greetingNote);
+  // The opening message (greeting, AI-agent note, clinic numbers, trial note)
+  // is no longer written by Claude: the system sends it at once when someone
+  // first writes (see sendWelcomeIfFirstContact), so Claude goes straight to
+  // answering.
+  const rawReply = await getVerifiedClaudeReply(history);
   const wantsCollecting = rawReply.includes(COLLECTING_MARKER);
   const reply = stripCollectingMarker(rawReply);
 
@@ -913,152 +965,3 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     console.log(`🚩 Conversation with ${senderId} flagged — bot paused.`);
 
     const displayName = await getDisplayName();
-
-    await queueTelegramCall(async () => {
-      await sendTelegramNotificationWithButton(
-        `🚩 tabanni bot flagged a conversation!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nThe bot is paused on this conversation until you resume it (see README for /admin/resume).`,
-        'toggle_handled',
-        '☐ Not handled yet'
-      );
-      await sendTelegramSpacer();
-    });
-  } else if (intakeSummaries) {
-    // An intake is now treated as a full handoff case too: pause for 24
-    // hours the same way HANDOFF/FLAG do, since the team needs to review
-    // and post the story card(s) themselves. Everything else about the
-    // intake (photos, story card, checkbox) stays exactly the same, now
-    // done once per pet when there is more than one in the same intake.
-    await setManualPause(senderId, true);
-    console.log(`🆕 Adoption intake ready for ${senderId} — ${intakeSummaries.length} pet(s). Bot paused for 24h.`);
-
-    const displayName = await getDisplayName();
-    const allPhotoUrls = await getPhotoUrls(senderId);
-
-    // PHOTO ATTRIBUTION: with multiple pets in one intake, the pooled
-    // photos need to be split correctly per animal. Each pet's summary
-    // reports how many of the photos belong to it (see the "Photo count"
-    // field in knowledge.js's multi-pet instructions), and pets are
-    // collected and photographed in order, so consuming that many photos
-    // per pet, in sequence, from the front of the pool gives the right
-    // slice for each one. Falls back to giving a single pet all the
-    // pooled photos when there is only one pet (the normal case).
-    let photoCursor = 0;
-    const perPetResults = [];
-    for (let i = 0; i < intakeSummaries.length; i++) {
-      const summary = intakeSummaries[i];
-      let fields = null;
-      let imageBuffer = null;
-      let imageGenError = null;
-      try {
-        fields = parseIntakeFields(summary);
-        let photoUrls;
-        if (intakeSummaries.length === 1) {
-          photoUrls = allPhotoUrls.slice(-8); // single pet: recent photos; the card drops duplicates and uses up to 4 distinct ones
-        } else {
-          const count = fields.photoCount != null ? fields.photoCount : 0;
-          photoUrls = allPhotoUrls.slice(photoCursor, photoCursor + count);
-          photoCursor += count;
-        }
-        if (photoUrls.length > 0 && fields.name) {
-          imageBuffer = await generateStoryImage({
-            photoUrls,
-            name: fields.name,
-            animalType: fields.animalType,
-            age: fields.age,
-            gender: fields.gender,
-            vaccination: fields.vaccination,
-            story: fields.story,
-            phone: fields.phone,
-          });
-        } else {
-          console.log(`Skipped story image for ${senderId} (pet ${i + 1}/${intakeSummaries.length}): missing photos or name.`);
-        }
-      } catch (err) {
-        console.error(`Story image generation failed for pet ${i + 1}/${intakeSummaries.length}:`, err);
-        imageGenError = err;
-      }
-      perPetResults.push({ summary, fields, imageBuffer, imageGenError });
-    }
-
-    await queueTelegramCall(async () => {
-      for (let i = 0; i < perPetResults.length; i++) {
-        const { summary, fields, imageBuffer, imageGenError } = perPetResults[i];
-        const petLabel = perPetResults.length > 1 ? ` (pet ${i + 1} of ${perPetResults.length})` : '';
-        await sendTelegramNotification(
-          `🐾🆕 New adoption intake ready to post!${petLabel}\n\nFrom: ${displayName}\n\n${summary}`
-        );
-        if (imageBuffer && fields) {
-          await sendTelegramStoryImage(
-            `🖼️ Ready-to-post story card for ${fields.name}${petLabel} — save and add to Instagram Stories. Tap the checkbox below once it is posted.`,
-            imageBuffer,
-            `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
-          );
-        } else if (imageGenError) {
-          await sendTelegramNotificationWithButton(
-            `⚠️ Could not auto-generate the story image for the intake above${petLabel} — please build it manually this time.`,
-            'toggle_handled',
-            '☐ Not handled yet'
-          );
-        }
-      }
-      await sendTelegramSpacer();
-    });
-
-    console.log(`✅ Adoption intake (${intakeSummaries.length} pet(s)) fully sent to Telegram for ${senderId} — bot paused 24h.`);
-  } else if (nursingInfo) {
-    console.log(`🍼 Nursing mother case flagged for ${senderId}.`);
-
-    const displayName = await getDisplayName();
-    const allPhotoUrls = await getPhotoUrls(senderId);
-    const latestPhoto = allPhotoUrls[allPhotoUrls.length - 1];
-
-    await queueTelegramCall(async () => {
-      if (latestPhoto) {
-        await sendTelegramAlertPhoto(
-          `🍼 Nursing Mom Alert\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}\nFound in: ${nursingInfo.foundIn || 'not said'}`,
-          latestPhoto,
-          'toggle_nursing',
-          '☐ Not handled yet'
-        );
-      } else {
-        await sendTelegramNotificationWithButton(
-          `🍼 Nursing Mom Alert (no photo received)\n\nFrom: ${displayName}\nPhone: ${nursingInfo.phone || 'not provided'}\nFound in: ${nursingInfo.foundIn || 'not said'}`,
-          'toggle_handled',
-          '☐ Not handled yet'
-        );
-      }
-      await sendTelegramSpacer();
-    });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 3) Admin controls — pause/resume a conversation manually. This is meant to
-//    be called from a small internal tool or even just curl/Postman for now;
-//    wire up a real dashboard button later if you want.
-// ---------------------------------------------------------------------------
-function checkAdminSecret(req, res, next) {
-  const provided = req.headers['x-admin-secret'];
-  if (provided !== process.env.ADMIN_SECRET) return res.sendStatus(401);
-  next();
-}
-
-app.post('/admin/pause', checkAdminSecret, async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: 'userId required' });
-  await setManualPause(userId, true);
-  res.json({ ok: true, userId, paused: true });
-});
-
-app.post('/admin/resume', checkAdminSecret, async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: 'userId required' });
-  await setManualPause(userId, false);
-  res.json({ ok: true, userId, paused: false });
-});
-
-// Simple health check for your hosting provider.
-app.get('/', (req, res) => res.send('tabanni bot is running 🐾'));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`tabanni bot listening on port ${PORT}`));

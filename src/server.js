@@ -332,10 +332,11 @@ const BANNED_ARABIC_WORDS = {
   'تحطوهن': 'تحطوهم',
   'هلق': 'هلأ',
   'هسع': 'هسا',
+  'فهمنا': 'بنتفهم', // "we understood" is never used, see the prompt
 };
 // A one-letter prefix (و ف ب ل, as in "وابغى" = "and I want") is also caught
 // for the words where that cannot clash with a real word.
-const WORDS_THAT_MAY_HAVE_A_PREFIX = new Set(['شنو', 'ابغى', 'وايد']);
+const WORDS_THAT_MAY_HAVE_A_PREFIX = new Set(['شنو', 'ابغى', 'وايد', 'فهمنا']);
 const BANNED_WORD_PATTERNS = Object.entries(BANNED_ARABIC_WORDS).map(([bad, good]) => {
   const prefix = WORDS_THAT_MAY_HAVE_A_PREFIX.has(bad) ? '([وفبل]?)' : '()';
   return [new RegExp(`(?<![${ARABIC_LETTERS}])${prefix}${bad}(?![${ARABIC_LETTERS}])`, 'g'), `$1${good}`];
@@ -382,10 +383,37 @@ function buildAgeClarification(lang, fieldsList) {
   return `${ar}\n\n${en}`;
 }
 
-// Wraps getClaudeReply with a language check + one automatic retry if the
-// reply came back in the wrong language. This is the real fix for language
-// mismatches — a prompt instruction alone was not reliable enough on its
-// own, this actually verifies the output before it gets sent.
+// --- The team never calls anyone ------------------------------------------------
+// tabanni's team does not phone people, so a reply must never promise a call,
+// or promise to "contact the number" the person gave. The prompt says so, and
+// this is the safeguard behind it: a reply that makes such a promise is
+// rewritten once by Claude before anything is sent. The patterns are narrow on
+// purpose: they only catch the TEAM promising a call, so a reply that tells
+// the person to call a clinic is left alone.
+const NOT_ARABIC_LETTER_BEFORE = '(?<![\\u0621-\\u0652])';
+const NOT_ARABIC_LETTER_AFTER = '(?![\\u0621-\\u0652])';
+const CALL_PROMISE_PATTERNS = [
+  // English: "we will call you", "someone from our team can phone you", "our team will ring you"
+  /\b(?:we|our team|the team|a team member|someone(?: from (?:the|our) team)?|a volunteer)\s+(?:will|shall|can|could|would|may|are going to|going to|try to|be able to)\s+(?:also\s+|then\s+)?(?:call|phone|ring)\b/i,
+  /\bwe(?:'|\u2019)ll\s+(?:call|phone|ring)\b/i,
+  /\bgive you a (?:call|ring)\b/i,
+  // English: "we will contact the number you gave us"
+  /\b(?:we|our team|the team|someone|a team member)\b[^.!?\n]{0,40}\b(?:contact|reach|text|message|whatsapp)\b[^.!?\n]{0,30}\b(?:the number|your number|that number|the phone)\b/i,
+  // Arabic: "رح نتصل فيكم", "بنكلمكم", "حدا رح يتصل فيكم"
+  new RegExp(NOT_ARABIC_LETTER_BEFORE + '(?:بنتصل|نتصل|نتّصل|بنتصّل|نتصّل|يتصل|يتصلوا|بيتصل|بيتصلوا|بنكلمكم|بنكلمك|نكلمكم|نكلمك|يكلمكم|يكلمك|بيكلمكم|بيكلمك)' + NOT_ARABIC_LETTER_AFTER),
+  // Arabic: "رح نتواصل مع الرقم", "نتواصل معكم على الرقم", "يتواصلوا عالرقم"
+  /[ني]تواصل(?:وا)?\s+(?:معكم\s+|معك\s+)?(?:على|عل|عا|ع|مع|ب|بـ)\s*(?:ال)?(?:رقم|تليفون|هاتف)/,
+];
+function promisesACall(text) {
+  const t = String(text || '');
+  return CALL_PROMISE_PATTERNS.some((p) => p.test(t));
+}
+
+// Wraps getClaudeReply with checks on the reply before it is sent, and ONE
+// automatic retry (with an explicit correction) if a check fails:
+//   - the reply is in the wrong language (a prompt instruction alone was not
+//     reliable enough on its own, this actually verifies the output), or
+//   - the reply promises that the team will call someone.
 //
 // baseNote (optional): extra context included in EVERY call for this turn,
 // not just a retry. (Currently unused: the opening message is now sent by
@@ -395,24 +423,42 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
   const reply = await getClaudeReply(history, baseNote);
 
   const expectedLang = languageOfConversation(history);
-  const actualLang = detectLanguage(extractOutgoingText(reply));
+  const outgoing = extractOutgoingText(reply);
+  const actualLang = detectLanguage(outgoing);
+  const wrongLanguage = !!(expectedLang && actualLang && expectedLang !== actualLang);
+  const callPromised = promisesACall(outgoing);
 
-  if (expectedLang && actualLang && expectedLang !== actualLang) {
-    const languageNames = { ar: 'Arabic', en: 'English' };
+  if (!wrongLanguage && !callPromised) return reply;
+
+  const languageNames = { ar: 'Arabic', en: 'English' };
+  const notes = [];
+  if (wrongLanguage) {
     console.log(`⚠️ Language mismatch detected (expected ${languageNames[expectedLang]}, got ${languageNames[actualLang]}) — retrying once.`);
-    const correctionNote = `CRITICAL CORRECTION: your previous reply was in the wrong language. The person's most recent message was in ${languageNames[expectedLang]}. Rewrite your ENTIRE reply in ${languageNames[expectedLang]} only, keeping the same meaning and keeping any [[MARKER]] you used exactly as it was. Do not mix languages.`;
-    const combinedNote = baseNote ? `${baseNote}\n\n${correctionNote}` : correctionNote;
-    const retryReply = await getClaudeReply(history, combinedNote);
-    const retryLang = detectLanguage(extractOutgoingText(retryReply));
-    if (retryLang === expectedLang) {
+    notes.push(`CRITICAL CORRECTION: your previous reply was in the wrong language. The person's most recent message was in ${languageNames[expectedLang]}. Rewrite your ENTIRE reply in ${languageNames[expectedLang]} only, keeping the same meaning and keeping any [[MARKER]] you used exactly as it was. Do not mix languages.`);
+  }
+  if (callPromised) {
+    console.log('⚠️ The reply promised a phone call or contacting a phone number — retrying once.');
+    notes.push("CRITICAL CORRECTION: your previous reply promised that tabanni's team would call the person, or contact the phone number they gave. tabanni's team never calls anyone. Rewrite your ENTIRE reply in the same language, keeping the same meaning and keeping any [[MARKER]] you used exactly as it was, but remove any promise of a call or of contacting a phone number. If a follow-up is needed, only say that the team will get back to them as soon as possible, without saying how.");
+  }
+  const combinedNote = [baseNote, ...notes].filter(Boolean).join('\n\n');
+  const retryReply = await getClaudeReply(history, combinedNote);
+  const retryOutgoing = extractOutgoingText(retryReply);
+
+  if (wrongLanguage) {
+    if (detectLanguage(retryOutgoing) === expectedLang) {
       console.log(`✅ Language corrected on retry.`);
     } else {
       console.log(`⚠️ Retry still did not match the expected language — sending it anyway (best effort, no further retries).`);
     }
-    return retryReply;
   }
-
-  return reply;
+  if (callPromised) {
+    if (promisesACall(retryOutgoing)) {
+      console.log('⚠️ The retry still promised a call — sending it anyway (best effort, no further retries).');
+    } else {
+      console.log('✅ The promise of a call was removed on retry.');
+    }
+  }
+  return retryReply;
 }
 
 // ---------------------------------------------------------------------------

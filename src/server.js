@@ -409,11 +409,30 @@ function promisesACall(text) {
   return CALL_PROMISE_PATTERNS.some((p) => p.test(t));
 }
 
+// --- Wording that is never used in an Arabic reply ----------------------------
+// tabanni does not say "boarding" in Arabic (it says the places provide
+// temporary care for a fee), and an animal is only ever male or female, never
+// "mixed" (مخلوط). The prompt says so; this is the safeguard behind it, in the
+// same way as the call check above: the reply is rewritten once before sending.
+function findArabicWordingProblems(text) {
+  const t = String(text || '');
+  if (!/[\u0600-\u06FF]/.test(t)) return [];
+  const problems = [];
+  if (/boarding/i.test(t)) {
+    problems.push('used the English word "boarding" in an Arabic reply. Never use it, and never call these places "our partners". If you suggest places for temporary care, say that tabanni can suggest places that provide temporary care for a fee: "ممكن نقترح على حضرتكم أماكن بتوفر الرعاية المؤقتة مقابل أجر"');
+  }
+  if (/مخلوط/.test(t)) {
+    problems.push('offered "mixed" (مخلوط) as an option for an animal\'s gender. There is no such thing: an animal is only male or female ("ذكر ولا أنثى")');
+  }
+  return problems;
+}
+
 // Wraps getClaudeReply with checks on the reply before it is sent, and ONE
 // automatic retry (with an explicit correction) if a check fails:
 //   - the reply is in the wrong language (a prompt instruction alone was not
 //     reliable enough on its own, this actually verifies the output), or
-//   - the reply promises that the team will call someone.
+//   - the reply promises that the team will call someone, or
+//   - the reply uses wording that is never used in Arabic (see findArabicWordingProblems).
 //
 // baseNote (optional): extra context included in EVERY call for this turn,
 // not just a retry. (Currently unused: the opening message is now sent by
@@ -427,8 +446,9 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
   const actualLang = detectLanguage(outgoing);
   const wrongLanguage = !!(expectedLang && actualLang && expectedLang !== actualLang);
   const callPromised = promisesACall(outgoing);
+  const wordingProblems = findArabicWordingProblems(outgoing);
 
-  if (!wrongLanguage && !callPromised) return reply;
+  if (!wrongLanguage && !callPromised && wordingProblems.length === 0) return reply;
 
   const languageNames = { ar: 'Arabic', en: 'English' };
   const notes = [];
@@ -439,6 +459,10 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
   if (callPromised) {
     console.log('⚠️ The reply promised a phone call or contacting a phone number — retrying once.');
     notes.push("CRITICAL CORRECTION: your previous reply promised that tabanni's team would call the person, or contact the phone number they gave. tabanni's team never calls anyone. Rewrite your ENTIRE reply in the same language, keeping the same meaning and keeping any [[MARKER]] you used exactly as it was, but remove any promise of a call or of contacting a phone number. If a follow-up is needed, only say that the team will get back to them as soon as possible, without saying how.");
+  }
+  if (wordingProblems.length > 0) {
+    console.log('⚠️ The reply used wording that is never used in Arabic — retrying once.');
+    notes.push(`CRITICAL CORRECTION: your previous reply ${wordingProblems.join(', and ')}. Rewrite your ENTIRE reply in the same language, keeping the same meaning and keeping any [[MARKER]] you used exactly as it was, without that wording.`);
   }
   const combinedNote = [baseNote, ...notes].filter(Boolean).join('\n\n');
   const retryReply = await getClaudeReply(history, combinedNote);
@@ -456,6 +480,13 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
       console.log('⚠️ The retry still promised a call — sending it anyway (best effort, no further retries).');
     } else {
       console.log('✅ The promise of a call was removed on retry.');
+    }
+  }
+  if (wordingProblems.length > 0) {
+    if (findArabicWordingProblems(retryOutgoing).length > 0) {
+      console.log('⚠️ The retry still used that wording — sending it anyway (best effort, no further retries).');
+    } else {
+      console.log('✅ The wording was corrected on retry.');
     }
   }
   return retryReply;

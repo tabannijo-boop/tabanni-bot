@@ -137,7 +137,7 @@ ${ADOPTION_APPLICATION_LINK}
 
 اذا كان عمرك اقل من ٢٣ سنة الرجاء تخلي والدك او والدتك يعبوا الطلب`;
 
-const FLOKI_EN = `Hello, thank you very much for your interest in Floki. We are currently reviewing a large number of applications we received for Floki. As a first step, we recommend that you fill out an adoption application, and my colleague Jida will get in touch with you as soon as possible if Floki is still available, or to suggest another cat based on the application you fill out.
+const FLOKI_EN = `Hello, thank you very much for your interest in Floki. We are currently reviewing a large number of applications we received for Floki. As a first step, we recommend that you fill out an adoption application, and my colleague will get in touch with you as soon as possible if Floki is still available, or to suggest another cat based on the application you fill out.
 
 Adoption application:
 ${ADOPTION_APPLICATION_LINK}

@@ -77,6 +77,12 @@ function botSendKey(userId) {
 function welcomeKey(userId) {
   return `tabanni:welcome:${userId}`;
 }
+function usernameKey(userId) {
+  return `tabanni:username:${userId}`;
+}
+function flokiKey(userId) {
+  return `tabanni:floki:${userId}`;
+}
 
 async function getConvo(userId) {
   const stored = await redis.get(convoKey(userId));
@@ -240,6 +246,30 @@ async function claimWelcome(userId) {
   return true;
 }
 
+// --- Instagram usernames ---------------------------------------------------
+// Every message to the volunteers names the customer. The name comes from an
+// Instagram lookup that can fail now and then, so the last username that was
+// found is remembered and used when a lookup fails.
+const USERNAME_CACHE_SECONDS = 90 * 24 * 60 * 60;
+async function getCachedUsername(userId) {
+  const v = await redis.get(usernameKey(userId));
+  return v ? String(v) : null;
+}
+async function setCachedUsername(userId, username) {
+  if (!username) return;
+  await redis.set(usernameKey(userId), String(username), { ex: USERNAME_CACHE_SECONDS });
+}
+
+// --- The Floki reply ---------------------------------------------------------
+// The fixed Floki answer is sent once per person per day. If the same person
+// mentions Floki again within that day, the conversation continues normally.
+// Atomic (Redis SETNX), like the welcome message.
+const FLOKI_REPLY_WINDOW_SECONDS = 24 * 60 * 60;
+async function claimFlokiReply(userId) {
+  const claimed = await redis.set(flokiKey(userId), Date.now(), { ex: FLOKI_REPLY_WINDOW_SECONDS, nx: true });
+  return claimed !== null;
+}
+
 module.exports = {
   isPaused,
   pauseAfterHumanReply,
@@ -257,4 +287,7 @@ module.exports = {
   getPhotoUrls,
   claimIncomingMessage,
   claimWelcome,
+  getCachedUsername,
+  setCachedUsername,
+  claimFlokiReply,
 };

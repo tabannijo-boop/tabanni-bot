@@ -17,6 +17,9 @@ const {
   getPhotoUrls,
   claimIncomingMessage,
   claimWelcome,
+  getCachedUsername,
+  setCachedUsername,
+  claimFlokiReply,
 } = require('./conversationState');
 const { sendInstagramMessage, getClaudeReply, sendTelegramNotification, getInstagramUserProfile, sendTelegramPhoto, sendTelegramVideo, sendTelegramSpacer, sendTelegramStoryImage, sendTelegramMediaGroup, editTelegramMessageReplyMarkup, answerTelegramCallbackQuery, queueTelegramCall, sendTelegramAlertPhoto, sendTelegramNotificationWithButton } = require('./apis');
 const { generateStoryImage } = require('./storyTemplate');
@@ -117,6 +120,57 @@ async function sendWelcomeIfFirstContact(senderId, firstText) {
     await sendInstagramReply(senderId, text);
   }
   console.log(`👋 Sent the welcome message to ${senderId}.`);
+}
+
+// --- The Floki reply ------------------------------------------------------------
+// Anyone who asks about Floki (فلوكي) gets this fixed answer instead of a
+// generated one, once per person per day (a second mention the same day goes
+// on to the normal conversation). It is sent in the language the person wrote
+// in. To change the wording, edit the two texts below. To remove the
+// application link, delete the line that holds it in both texts.
+const ADOPTION_APPLICATION_LINK = 'https://tabanni.surveysparrow.com/s/tabanniadoptionapplication/tt-0bb3ad';
+
+const FLOKI_AR = `مرحبا شكراً كتير لاهتمامك بفلوكي حالياً عم نراجع عدد كبير من الطلبات اللي وصلتنا لفلوكي كخطوة اولى بننصحكم تعبوا طلب تبني وزميلتي جيدا بتتواصل معكم باسرع وقت ممكن في حال كان فلوكي لسا موجود او لنقترحلكم قطة تانية حسب الطلب اللي رح تعبوه🙏🏻
+
+رابط طلب التبني:
+${ADOPTION_APPLICATION_LINK}
+
+اذا كان عمرك اقل من ٢٣ سنة الرجاء تخلي والدك او والدتك يعبوا الطلب`;
+
+const FLOKI_EN = `Hello, thank you very much for your interest in Floki. We are currently reviewing a large number of applications we received for Floki. As a first step, we recommend that you fill out an adoption application, and my colleague Jida will get in touch with you as soon as possible if Floki is still available, or to suggest another cat based on the application you fill out.
+
+Adoption application:
+${ADOPTION_APPLICATION_LINK}
+
+If you are under 23 years old, please ask your father or mother to fill out the application.`;
+
+// Floki in English (floki, Floky, Flooki...) or Arabic (فلوكي, فلوكى, also with a
+// one-letter prefix such as لفلوكي or بفلوكي).
+const FLOKI_PATTERN = new RegExp('\\bflo+k+[iy]e?\\b|(?<![\\u0621-\\u0652])[وفبلك]?فلوك[يى](?![\\u0621-\\u0652])', 'i');
+function mentionsFloki(text) {
+  return FLOKI_PATTERN.test(String(text || ''));
+}
+
+// --- Who is this? (for the volunteers on Telegram) ------------------------------------
+// Every message to the volunteers names the customer. The name comes from an
+// Instagram lookup that can fail now and then, so it is tried twice, and the
+// last username that was found for this person is used if both fail. Only if
+// there is truly nothing does the message say so, together with the
+// Instagram ID, so a message never goes out without saying who it is about.
+async function getDisplayNameFor(senderId) {
+  let profile = await getInstagramUserProfile(senderId);
+  if (!profile) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    profile = await getInstagramUserProfile(senderId);
+  }
+  if (profile && profile.username) {
+    await setCachedUsername(senderId, profile.username);
+    return `@${profile.username}`;
+  }
+  const cached = await getCachedUsername(senderId);
+  if (cached) return `@${cached}`;
+  const name = profile && profile.name ? `${profile.name} ` : '';
+  return `${name}(username not available, Instagram ID ${senderId})`;
 }
 
 // The [[INTAKE]] marker is different from [[HANDOFF]] and [[FLAG]]: it wraps
@@ -720,8 +774,7 @@ async function flushPendingTurn(senderId) {
     if (await isPaused(senderId)) {
       console.log(`Conversation with ${senderId} is paused — dropping buffered photos/videos without replying.`);
     } else {
-      const profile = await getInstagramUserProfile(senderId);
-      displayName = profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
+      displayName = await getDisplayNameFor(senderId);
 
       const photoCount = pending.items.filter((i) => i.type === 'image').length;
       const videoCount = pending.items.filter((i) => i.type === 'video').length;
@@ -933,6 +986,16 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     return;
   }
 
+  // Anyone asking about Floki gets the fixed Floki answer (see FLOKI_AR above)
+  // instead of a generated one, once per person per day.
+  if (mentionsFloki(effectiveText) && (await claimFlokiReply(senderId))) {
+    const flokiText = languageOfConversation(history) === 'en' ? FLOKI_EN : FLOKI_AR;
+    await addAssistantMessage(senderId, flokiText);
+    await sendInstagramReply(senderId, flokiText);
+    console.log(`🐈 Sent the Floki reply to ${senderId}.`);
+    return;
+  }
+
   // The opening message (greeting, AI-agent note, clinic numbers, trial note)
   // is no longer written by Claude: the system sends it at once when someone
   // first writes (see sendWelcomeIfFirstContact), so Claude goes straight to
@@ -1014,10 +1077,10 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     await setCollecting(senderId, true);
   }
 
+  let displayNameForThisTurn = precomputedDisplayName && precomputedDisplayName.startsWith('@') ? precomputedDisplayName : null;
   const getDisplayName = async () => {
-    if (precomputedDisplayName) return precomputedDisplayName;
-    const profile = await getInstagramUserProfile(senderId);
-    return profile?.username ? `@${profile.username}` : (profile?.name || `IGSID ${senderId}`);
+    if (!displayNameForThisTurn) displayNameForThisTurn = await getDisplayNameFor(senderId);
+    return displayNameForThisTurn;
   };
 
   if (needsHandoff) {
@@ -1118,13 +1181,13 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
         );
         if (imageBuffer && fields) {
           await sendTelegramStoryImage(
-            `🖼️ Ready-to-post story card for ${fields.name}${petLabel} — save and add to Instagram Stories. Tap the checkbox below once it is posted.`,
+            `🖼️ Ready-to-post story card for ${fields.name}${petLabel}\nFrom: ${displayName}\n\nSave and add to Instagram Stories. Tap the checkbox below once it is posted.`,
             imageBuffer,
             `tabanni_story_${fields.name.replace(/\s+/g, '_')}.png`
           );
         } else if (imageGenError) {
           await sendTelegramNotificationWithButton(
-            `⚠️ Could not auto-generate the story image for the intake above${petLabel} — please build it manually this time.`,
+            `⚠️ Could not auto-generate the story image for the intake above${petLabel}\nFrom: ${displayName}\n\nPlease build it manually this time.`,
             'toggle_handled',
             '☐ Not handled yet'
           );

@@ -481,12 +481,57 @@ function findArabicWordingProblems(text) {
   return problems;
 }
 
+// --- No prices, no arrangements ---------------------------------------------------
+// The bot only gives advice. It never quotes a price, fee or estimate (the one
+// exception is the fixed adoption fee) and never arranges or schedules anything:
+// costs and arrangements go to the team. The prompt says so (COSTS AND
+// ARRANGEMENTS); this is the safeguard behind it. A reply that quotes a price or
+// schedules a pickup is rewritten once, and if it STILL does, the person gets a
+// fixed short message and the conversation is handed to the team instead, so a
+// wrong price or a made-up pickup never reaches anyone.
+const ALLOWED_PRICE_NUMBERS = new Set(['45', '85']); // the adoption fee: 85 JOD for a dog, 45 JOD for a cat
+function toWesternDigits(text) {
+  return String(text || '').replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660));
+}
+const CURRENCY = '(?:JOD|JD|J\\.D\\.?|dinars?|دينار|دنانير|دينارا|USD|dollars?|دولار|\\$)';
+const NUMBER_OR_RANGE = '(\\d+(?:[.,]\\d+)?(?:\\s*(?:-|–|—|to|و)\\s*\\d+(?:[.,]\\d+)?)?)';
+function findPrices(text) {
+  const t = toWesternDigits(text);
+  const found = [];
+  for (const re of [new RegExp(NUMBER_OR_RANGE + '\\s*' + CURRENCY, 'gi'), new RegExp(CURRENCY + '\\s*' + NUMBER_OR_RANGE, 'gi')]) {
+    let m;
+    while ((m = re.exec(t)) !== null) found.push(m[1] || m[2]);
+  }
+  return found;
+}
+const ARRANGEMENT_PATTERNS = [
+  // English: "What time would work best for the Saturday pickup"
+  /\bwhat (?:time|day)\b[^?.!\n]{0,60}\b(?:pick ?up|pickup|pick (?:her|him|it|them) up|return|bring (?:her|him|it|them)|drop)/i,
+  /\b(?:we|I) (?:will|can) (?:also )?arrange (?:a |the )?(?:pick ?up|pickup|transport|return)/i,
+  /\b(?:pick ?up|pickup)\b[^.!?\n]{0,40}\b(?:on |at |this |next )?(?:Saturday|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|tomorrow|today|tonight)\b/i,
+  /\b(?:Saturday|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|tomorrow|tonight)\b[^.!?\n]{0,40}\b(?:pick ?up|pickup)\b/i,
+  /\bAhmad\b[^.!?\n]{0,30}\b(?:will|to|can)\b[^.!?\n]{0,20}\b(?:pick|bring|take|come|collect)/i,
+  // Arabic: "رح نرتب النقل", "ننسق الاستلام"
+  /(?:نرتب|ننسق|نحجز)[^.!?؟\n]{0,30}(?:نقل|استلام|توصيل)/,
+  // Arabic: "أي ساعة بدكم نستلم"
+  /(?:أي|اي|شو|ايش)\s+(?:ساعة|وقت|يوم)[^.!?؟\n]{0,50}(?:استلام|نستلم|توصيل|نوصل|ترجيع|نرجع)/,
+];
+function quotesPriceOrArranges(text) {
+  const t = String(text || '');
+  const priceOutsideAdoptionFee = findPrices(t).some((p) => (p.match(/\d+(?:[.,]\d+)?/g) || []).some((n) => !ALLOWED_PRICE_NUMBERS.has(n)));
+  return priceOutsideAdoptionFee || ARRANGEMENT_PATTERNS.some((re) => re.test(t));
+}
+const COST_HANDOFF_EN = 'Of course. I will get someone from the team to reply to you about this as soon as possible.';
+const COST_HANDOFF_AR = 'أكيد. رح أخلي حد من الفريق يرد عليكم بخصوص هاد الموضوع بأسرع وقت.';
+
 // Wraps getClaudeReply with checks on the reply before it is sent, and ONE
 // automatic retry (with an explicit correction) if a check fails:
 //   - the reply is in the wrong language (a prompt instruction alone was not
 //     reliable enough on its own, this actually verifies the output), or
 //   - the reply promises that the team will call someone, or
-//   - the reply uses wording that is never used in Arabic (see findArabicWordingProblems).
+//   - the reply uses wording that is never used in Arabic (see findArabicWordingProblems), or
+//   - the reply quotes a price or arranges something (see quotesPriceOrArranges). If the
+//     retry still does, the person gets a short fixed message and the team takes over.
 //
 // baseNote (optional): extra context included in EVERY call for this turn,
 // not just a retry. (Currently unused: the opening message is now sent by
@@ -501,8 +546,9 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
   const wrongLanguage = !!(expectedLang && actualLang && expectedLang !== actualLang);
   const callPromised = promisesACall(outgoing);
   const wordingProblems = findArabicWordingProblems(outgoing);
+  const pricedOrArranged = quotesPriceOrArranges(outgoing);
 
-  if (!wrongLanguage && !callPromised && wordingProblems.length === 0) return reply;
+  if (!wrongLanguage && !callPromised && wordingProblems.length === 0 && !pricedOrArranged) return reply;
 
   const languageNames = { ar: 'Arabic', en: 'English' };
   const notes = [];
@@ -517,6 +563,10 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
   if (wordingProblems.length > 0) {
     console.log('⚠️ The reply used wording that is never used in Arabic — retrying once.');
     notes.push(`CRITICAL CORRECTION: your previous reply ${wordingProblems.join(', and ')}. Rewrite your ENTIRE reply in the same language, keeping the same meaning and keeping any [[MARKER]] you used exactly as it was, without that wording.`);
+  }
+  if (pricedOrArranged) {
+    console.log('⚠️ The reply quoted a price or arranged something — retrying once.');
+    notes.push('CRITICAL CORRECTION: your previous reply quoted a price, fee or estimate, or arranged or scheduled something (a pickup, a time, a day, a place). You must NEVER do either. Remove every price, estimate and arrangement detail. If the person asked about costs, or wants something arranged, reply only with a short warm message saying that someone from the team will reply to them as soon as possible, and start your reply with the exact marker [[HANDOFF]]. Otherwise just give advice, in the same language as before.');
   }
   const combinedNote = [baseNote, ...notes].filter(Boolean).join('\n\n');
   const retryReply = await getClaudeReply(history, combinedNote);
@@ -542,6 +592,13 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
     } else {
       console.log('✅ The wording was corrected on retry.');
     }
+  }
+  if (pricedOrArranged) {
+    if (quotesPriceOrArranges(retryOutgoing)) {
+      console.log('⚠️ The retry still quoted a price or arranged something — sending the fixed handoff message to the team instead.');
+      return '[[HANDOFF]]' + (expectedLang === 'en' ? COST_HANDOFF_EN : COST_HANDOFF_AR);
+    }
+    console.log('✅ The price or arrangement was removed on retry.');
   }
   return retryReply;
 }

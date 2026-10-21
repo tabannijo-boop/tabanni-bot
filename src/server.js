@@ -82,6 +82,7 @@ Pets Corner (Dr Mohammad Bakhit), Wadi Saqra: 07 9835 5477
 First Pet, Abdoun: 07 9501 3824
 First Pet, Swefieh: 0797177835
 Petpark (Dr Rakan), Swefieh: 065866557
+Garden Sanctuary Veterinary Hospital: +962 6 412 9077
 
 For lost or found pets: contact @tabanni.jordan.lostandfound
 
@@ -94,6 +95,7 @@ Pets Corner (د. محمد بخيت)، وادي صقرة: 07 9835 5477
 First Pet، عبدون: 07 9501 3824
 First Pet، صويفية: 0797177835
 Petpark (د. ركان)، صويفية: 065866557
+Garden Sanctuary Veterinary Hospital: +962 6 412 9077
 
 للإبلاغ عن حيوان مفقود أو عثر عليه: @tabanni.jordan.lostandfound
 

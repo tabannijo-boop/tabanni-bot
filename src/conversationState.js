@@ -33,8 +33,11 @@ const HANDOFF_PAUSE_EXPIRY_MS = PAUSE_SECONDS * 1000; // used only for older pau
 const STATE_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 // How long a person can stay silent before their next message gets the
-// welcome message again (see claimWelcome below).
-const WELCOME_REFRESH_SECONDS = 7 * 24 * 60 * 60;
+// welcome message again (see claimWelcome below): 7 days. For TESTING with
+// your own account you can set WELCOME_REFRESH_MINUTES in Render (for example 1),
+// then delete it again afterwards.
+const WELCOME_REFRESH_MINUTES = Number(process.env.WELCOME_REFRESH_MINUTES);
+const WELCOME_REFRESH_SECONDS = Math.max(1, Math.round((Number.isFinite(WELCOME_REFRESH_MINUTES) && WELCOME_REFRESH_MINUTES > 0 ? WELCOME_REFRESH_MINUTES : 7 * 24 * 60) * 60));
 const WELCOME_REFRESH_MS = WELCOME_REFRESH_SECONDS * 1000;
 
 // How long we remember a bot-sent message ID, to recognize its own echo

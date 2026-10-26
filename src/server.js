@@ -75,7 +75,7 @@ async function sendInstagramReply(senderId, text) {
 // bot's short wait before answering.
 //
 // To change the welcome, edit the two texts below. Nothing else needs to change.
-const WELCOME_EN = `Hello, you are talking to Karam, tabanni's AI assistant. We will reply as soon as possible.
+const WELCOME_EN = `Hello, thank you for contacting tabanni. You are talking to Karam, tabanni's AI assistant. We will reply as soon as possible.
 
 If an animal is very sick, injured, poisoned, abused, or was run over, please contact one of our partner clinics directly so the animal can be seen as soon as possible, and mention that tabanni referred you:
 Pets Corner (Dr Mohammad Bakhit), Wadi Saqra: 07 9835 5477
@@ -88,7 +88,7 @@ For lost or found pets: contact @tabanni.jordan.lostandfound
 
 Please note, we are currently in a trial phase while testing this chatbot. If you notice any errors, please know this is part of the trial period. If you would like to report anything about the chatbot, please email info@tabanni.org with the subject CHATBOT error report. Thank you.`;
 
-const WELCOME_AR = `مرحبًا، أنتم تتحدثون مع كرم، مساعد تبني الذكي الاصطناعي. سنرد في أقرب وقت ممكن.
+const WELCOME_AR = `مرحبًا، شكرًا لتواصلكم مع تبنّي. أنتم تتحدثون مع كرم، مساعد تبني الذكي الاصطناعي. سنرد في أقرب وقت ممكن.
 
 إذا كان الحيوان مريضًا جدًا، أو مصابًا، أو متسممًا، أو تعرض للإساءة أو الدهس، لطفاً تواصلوا مباشرة مع إحدى عياداتنا الشريكة ليتم فحصه بأسرع وقت، وقولوا انكم أخدتوا الرقم من تبني:
 Pets Corner (د. محمد بخيت)، وادي صقرة: 07 9835 5477
@@ -614,6 +614,12 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
 app.post('/api/test-chat', async (req, res) => {
   try {
     const history = Array.isArray(req.body.history) ? req.body.history : [];
+    // The real bot sends the welcome as a separate message the moment a person first writes.
+    // The test page has one bubble, so on the first message it shows the welcome, a line, and then the answer.
+    const userTurns = history.filter((m) => m.role === 'user');
+    const isFirstMessage = userTurns.length === 1 && !history.some((m) => m.role === 'assistant');
+    const testPageLine = '\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n';
+    const welcomePrefix = isFirstMessage && process.env.SEND_WELCOME_MESSAGE !== 'false' ? welcomeMessagesFor(userTurns[0].content).join(testPageLine) + testPageLine : '';
     const reply = stripCollectingMarker(await getVerifiedClaudeReply(history));
     const HANDOFF_MARKER = '[[HANDOFF]]';
     const FLAG_MARKER = '[[FLAG]]';
@@ -626,7 +632,7 @@ app.post('/api/test-chat', async (req, res) => {
     if (intakeParsed) {
       const ageQuestion = buildAgeClarification(languageOfConversation(history), intakeParsed.summaries.map(parseIntakeFields));
       if (ageQuestion) {
-        return res.json({ reply: ageQuestion, handoff: false, intake: false });
+        return res.json({ reply: welcomePrefix + ageQuestion, handoff: false, intake: false });
       }
       intake = true;
       outgoingText = buildIntakeThanks(languageOfConversation(history), intakeParsed.summaries.map(parseIntakeFields));
@@ -657,7 +663,7 @@ app.post('/api/test-chat', async (req, res) => {
       );
       await sendTelegramSpacer();
     }
-    res.json({ reply: fixArabicWording(outgoingText), handoff, intake });
+    res.json({ reply: welcomePrefix + fixArabicWording(outgoingText), handoff, intake });
   } catch (err) {
     console.error('Test chat error:', err);
     res.status(500).json({ reply: "Something went wrong — check server logs.", handoff: false });

@@ -75,7 +75,7 @@ async function sendInstagramReply(senderId, text) {
 // bot's short wait before answering.
 //
 // To change the welcome, edit the two texts below. Nothing else needs to change.
-const WELCOME_EN = `Hello, thank you for contacting tabanni. You are talking to tabanni's AI agent. We will reply as soon as possible.
+const WELCOME_EN = `Hello, you are talking to Karam, tabanni's AI assistant. We will reply as soon as possible.
 
 If an animal is very sick, injured, poisoned, abused, or was run over, please contact one of our partner clinics directly so the animal can be seen as soon as possible, and mention that tabanni referred you:
 Pets Corner (Dr Mohammad Bakhit), Wadi Saqra: 07 9835 5477
@@ -88,7 +88,7 @@ For lost or found pets: contact @tabanni.jordan.lostandfound
 
 Please note, we are currently in a trial phase while testing this chatbot. If you notice any errors, please know this is part of the trial period. If you would like to report anything about the chatbot, please email info@tabanni.org with the subject CHATBOT error report. Thank you.`;
 
-const WELCOME_AR = `مرحبًا، شكرًا لتواصلكم مع تبنّي. أنتم تتحدثون مع مساعد تبني الذكي الاصطناعي. سنرد في أقرب وقت ممكن.
+const WELCOME_AR = `مرحبًا، أنتم تتحدثون مع كرم، مساعد تبني الذكي الاصطناعي. سنرد في أقرب وقت ممكن.
 
 إذا كان الحيوان مريضًا جدًا، أو مصابًا، أو متسممًا، أو تعرض للإساءة أو الدهس، لطفاً تواصلوا مباشرة مع إحدى عياداتنا الشريكة ليتم فحصه بأسرع وقت، وقولوا انكم أخدتوا الرقم من تبني:
 Pets Corner (د. محمد بخيت)، وادي صقرة: 07 9835 5477
@@ -643,7 +643,7 @@ app.post('/api/test-chat', async (req, res) => {
       handoff = true;
       outgoingText = reply.split(HANDOFF_MARKER).join('').trim();
       await sendTelegramNotificationWithButton(
-        `🧪 [TEST PAGE] tabanni bot flagged a conversation for a volunteer.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`,
+        `🧪 [TEST PAGE] Karam flagged a conversation for a volunteer.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`,
         'toggle_handled',
         '☐ Not handled yet'
       );
@@ -651,7 +651,7 @@ app.post('/api/test-chat', async (req, res) => {
     } else if (reply.includes(FLAG_MARKER)) {
       outgoingText = reply.split(FLAG_MARKER).join('').trim();
       await sendTelegramNotificationWithButton(
-        `🧪🚩 [TEST PAGE] tabanni bot flagged a conversation.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`,
+        `🧪🚩 [TEST PAGE] Karam flagged a conversation.\n\nLast message: "${lastUserMsg ? lastUserMsg.content : '(unknown)'}"\n\nThis came from the /test.html team test page, not real Instagram.`,
         'toggle_handled',
         '☐ Not handled yet'
       );
@@ -1153,7 +1153,7 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     // conversation's messages landing in between.
     await queueTelegramCall(async () => {
       await sendTelegramNotificationWithButton(
-        `🐾 tabanni bot needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`,
+        `🐾 Karam needs a volunteer!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nOpen Instagram DMs to reply — the bot is paused on this conversation until you resume it (see README for /admin/resume).`,
         'toggle_handled',
         '☐ Not handled yet'
       );
@@ -1167,7 +1167,7 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
 
     await queueTelegramCall(async () => {
       await sendTelegramNotificationWithButton(
-        `🚩 tabanni bot flagged a conversation!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nThe bot is paused on this conversation until you resume it (see README for /admin/resume).`,
+        `🚩 Karam flagged a conversation!\n\nFrom: ${displayName}\nMessage: "${effectiveText}"\n\nThe bot is paused on this conversation until you resume it (see README for /admin/resume).`,
         'toggle_handled',
         '☐ Not handled yet'
       );

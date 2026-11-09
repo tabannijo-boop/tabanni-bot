@@ -70,14 +70,14 @@ async function sendInstagramReply(senderId, text) {
 // Sent by the bot, word for word, the moment a person first writes (and again
 // after 7 days of silence). It replaces the automatic reply that Instagram
 // itself used to send, which has been switched off. It is fixed text on
-// purpose: it carries the partner clinics' phone numbers, which must never be
+// purpose: it carries the clinics' phone numbers, which must never be
 // changed or dropped, and it must reach the person immediately, not after the
 // bot's short wait before answering.
 //
 // To change the welcome, edit the two texts below. Nothing else needs to change.
 const WELCOME_EN = `Hello, thank you for contacting tabanni. You are talking to Karam, tabanni's AI assistant. We will reply as soon as possible.
 
-If an animal is very sick, injured, poisoned, abused, or was run over, please contact one of our partner clinics directly so the animal can be seen as soon as possible, and mention that tabanni referred you:
+If an animal is very sick, injured, poisoned, abused, or was run over, please contact one of the vets in tabanni's network directly so the animal can be seen as soon as possible, and mention that tabanni referred you:
 Pets Corner (Dr Mohammad Bakhit), Wadi Saqra: 07 9835 5477
 First Pet, Abdoun: 07 9501 3824
 First Pet, Swefieh: 0797177835
@@ -90,7 +90,7 @@ Please note, we are currently in a trial phase while testing this chatbot. If yo
 
 const WELCOME_AR = `مرحبًا، شكرًا لتواصلكم مع تبنّي. أنتم تتحدثون مع كرم، مساعد تبني الذكي الاصطناعي. سنرد في أقرب وقت ممكن.
 
-إذا كان الحيوان مريضًا جدًا، أو مصابًا، أو متسممًا، أو تعرض للإساءة أو الدهس، لطفاً تواصلوا مباشرة مع إحدى عياداتنا الشريكة ليتم فحصه بأسرع وقت، وقولوا انكم أخدتوا الرقم من تبني:
+إذا كان الحيوان مريضًا جدًا، أو مصابًا، أو متسممًا، أو تعرض للإساءة أو الدهس، لطفاً تواصلوا مباشرة مع إحدى العيادات ضمن شبكة تبنّي ليتم فحصه بأسرع وقت، وقولوا انكم أخدتوا الرقم من تبني:
 Pets Corner (د. محمد بخيت)، وادي صقرة: 07 9835 5477
 First Pet، عبدون: 07 9501 3824
 First Pet، صويفية: 0797177835
@@ -408,6 +408,58 @@ function fixArabicWording(text) {
   return out;
 }
 
+// --- Nobody is tabanni's partner ------------------------------------------------------
+// tabanni says "vets in tabanni's network" (Arabic: "عيادات ضمن شبكة تبنّي") about its
+// vets, and "places that provide temporary care for a fee" about the others. Nobody is
+// ever called a partner (partner, partners, partnered, partnership, شريك, شركاء,
+// شركائنا, شراكة). The prompt says so; this is the guarantee behind it, in two steps:
+//   1. a reply that still calls someone a partner is rewritten once by Claude, and
+//   2. whatever is still left is swapped for the approved wording right before sending.
+function matchCase(original, replacement) {
+  return /^[A-Z]/.test(original) ? replacement.charAt(0).toUpperCase() + replacement.slice(1) : replacement;
+}
+function fixPartnerWording(text, { generic = false, quiet = false } = {}) {
+  let out = String(text || '');
+  const before = out;
+  const swap = (re, replacement) => { out = out.replace(re, (m) => matchCase(m, replacement)); };
+  const L = '\\u0621-\\u0652';
+  const ar = (pattern, replacement) => { out = out.replace(new RegExp(pattern.replace(/\{L\}/g, L), 'g'), replacement); };
+
+  // Vets and clinics (always)
+  swap(/\bone of (?:our |the |tabanni(?:'|\u2019)s )?partner(?:ed)? (?:vet(?:erinary)? )?(?:clinics|vets|hospitals|veterinarians)\b/gi, "one of the vets in tabanni's network");
+  swap(/\b(?:our|the|tabanni(?:'|\u2019)s) partner(?:ed)? (?:vet(?:erinary)? )?(?:clinics|vets|hospitals|veterinarians)\b/gi, "the vets in tabanni's network");
+  swap(/\b(?:an? |our |the |tabanni(?:'|\u2019)s )?partner(?:ed)? (?:vet(?:erinary)? )?(?:clinic|vet|hospital|veterinarian)\b/gi, "a vet in tabanni's network");
+  swap(/\bpartner(?:ed)? (?:vet(?:erinary)? )?(?:clinics|vets|hospitals|veterinarians)\b/gi, "vets in tabanni's network");
+  ar('(?<![{L}])(ال)?عيادات(نا)?\\s+(?:ال)?شريكة(?![{L}])', (m, def, our) => (def || our ? 'العيادات' : 'عيادات') + ' ضمن شبكة تبنّي');
+  ar('(?<![{L}])(ال)?عيادة(نا)?\\s+(?:ال)?شريكة(?![{L}])', (m, def, our) => (def || our ? 'العيادة' : 'عيادة') + ' ضمن شبكة تبنّي');
+  ar('(?<![{L}])(ال)?(بياطرة|أطباء بيطريين|اطباء بيطريين)\\s+(?:ال)?(?:شركاء|شريكين)(?![{L}])', (m, def, noun) => (def ? 'ال' : '') + noun + ' ضمن شبكة تبنّي');
+
+  // Everyone else (places for temporary care, shops, organizations): only as the last step
+  if (generic) {
+    swap(/\b(?:our |the |tabanni(?:'|\u2019)s )?(?:boarding|temporary[- ]care|care) partners?\b/gi, 'places that provide temporary care for a fee');
+    swap(/\b(?:our|the|tabanni(?:'|\u2019)s) partners\b/gi, "the places in tabanni's network");
+    swap(/\bpartners\b/gi, "places in tabanni's network");
+    swap(/\bpartner(?:ed)? (?:places?|facilit(?:y|ies)|shelters?|shops?|stores?|organi[sz]ations?|centers?|centres?|homes?)\b/gi, "places in tabanni's network");
+    swap(/\bin partnership with\b/gi, 'together with');
+    swap(/\bpartnered with\b/gi, 'work with');
+    swap(/\bpartnerships?\b/gi, 'cooperation');
+    swap(/\b(?:our|a|the) partner\b/gi, "a place in tabanni's network");
+    ar('(?<![{L}])(ال)?(أماكن|اماكن|مراكز|مرافق|محلات)\\s+(?:ال)?شريكة(?![{L}])', (m, def, noun) => (def || '') + noun + ' ضمن شبكة تبنّي');
+    ar('(?<![{L}])(?:شركائنا|شركاءنا|شركاؤنا)(?![{L}])', 'الأماكن ضمن شبكة تبنّي');
+    ar('(?<![{L}])(ال|و|ب|ل)?شركاء(?![{L}])', (m, pre) => (pre && pre !== 'ال' ? pre : '') + 'أماكن ضمن شبكة تبنّي');
+    ar('(?<![{L}])(?:شراكة|شراكات)(?![{L}])', 'تعاون');
+    ar('(?<![{L}])(?:شريكنا|شريكتنا)(?![{L}])', 'المكان ضمن شبكة تبنّي');
+  }
+  if (!quiet && out !== before) console.log('✏️ Replaced "partner" wording before sending.');
+  return out;
+}
+// True when a reply still calls someone a partner after the vet wording was fixed:
+// Claude is then asked to rewrite it once, before the last-step swap above.
+function needsPartnerRewrite(text) {
+  const specific = fixPartnerWording(text, { quiet: true });
+  return fixPartnerWording(specific, { generic: true, quiet: true }) !== specific;
+}
+
 // --- Ages must have a unit --------------------------------------------------
 // "5" could mean five years or five months, and the story card prints the age
 // as a tag, so a bare number must never get through. The prompt tells Claude
@@ -549,8 +601,9 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
   const callPromised = promisesACall(outgoing);
   const wordingProblems = findArabicWordingProblems(outgoing);
   const pricedOrArranged = quotesPriceOrArranges(outgoing);
+  const calledAPartner = needsPartnerRewrite(outgoing);
 
-  if (!wrongLanguage && !callPromised && wordingProblems.length === 0 && !pricedOrArranged) return reply;
+  if (!wrongLanguage && !callPromised && wordingProblems.length === 0 && !pricedOrArranged && !calledAPartner) return reply;
 
   const languageNames = { ar: 'Arabic', en: 'English' };
   const notes = [];
@@ -569,6 +622,10 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
   if (pricedOrArranged) {
     console.log('⚠️ The reply quoted a price or arranged something — retrying once.');
     notes.push('CRITICAL CORRECTION: your previous reply quoted a price, fee or estimate, or arranged or scheduled something (a pickup, a time, a day, a place). You must NEVER do either. Remove every price, estimate and arrangement detail. If the person asked about costs, or wants something arranged, reply only with a short warm message saying that someone from the team will reply to them as soon as possible, and start your reply with the exact marker [[HANDOFF]]. Otherwise just give advice, in the same language as before.');
+  }
+  if (calledAPartner) {
+    console.log('⚠️ The reply called someone a partner — retrying once.');
+    notes.push('CRITICAL CORRECTION: your previous reply called someone a partner. Nobody is tabanni\'s partner. Never use the words partner, partners, partnered, partnership, شريك, شركاء, شركائنا or شراكة about anyone. Vets are "vets in tabanni\'s network" (AR: عيادات ضمن شبكة تبنّي), and places that give temporary care are "places that provide temporary care for a fee" (AR: أماكن بتوفر الرعاية المؤقتة مقابل أجر). Rewrite your ENTIRE reply in the same language, keeping the same meaning and keeping any [[MARKER]] you used exactly as it was.');
   }
   const combinedNote = [baseNote, ...notes].filter(Boolean).join('\n\n');
   const retryReply = await getClaudeReply(history, combinedNote);
@@ -663,7 +720,7 @@ app.post('/api/test-chat', async (req, res) => {
       );
       await sendTelegramSpacer();
     }
-    res.json({ reply: welcomePrefix + fixArabicWording(outgoingText), handoff, intake });
+    res.json({ reply: welcomePrefix + fixPartnerWording(fixArabicWording(outgoingText), { generic: true }), handoff, intake });
   } catch (err) {
     console.error('Test chat error:', err);
     res.status(500).json({ reply: "Something went wrong — check server logs.", handoff: false });
@@ -1130,7 +1187,7 @@ async function processTurn(senderId, effectiveText, precomputedDisplayName) {
     outgoingText = reply.split(FLAG_MARKER).join('').trim();
   }
 
-  outgoingText = fixArabicWording(outgoingText);
+  outgoingText = fixPartnerWording(fixArabicWording(outgoingText), { generic: true });
   await sendInstagramReply(senderId, outgoingText);
 
   // Photos and videos are wanted only while an animal's details are being

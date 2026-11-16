@@ -332,22 +332,29 @@ function buildIntakeThanks(lang, fieldsList) {
   const g = many ? null : classifyGender(fieldsList[0] && fieldsList[0].gender);
 
   const arForms = g === 'female'
-    ? { about: 'عنها', care: 'فيها', take: 'ياخدها' }
+    ? { about: 'عنها', care: 'فيها', take: 'ياخدها', forwho: 'لأجلها' }
     : g === 'male'
-      ? { about: 'عنه', care: 'فيه', take: 'ياخده' }
-      : { about: 'عنهم', care: 'فيهم', take: 'ياخدهم' };
-  const ar = `شكراً لتزويدنا بكل التفاصيل. وصلتنا كل المعلومات ورح ننشر ${arForms.about} بالستوري قريباً.
+      ? { about: 'عنه', care: 'فيه', take: 'ياخده', forwho: 'لأجله' }
+      : { about: 'عنهم', care: 'فيهم', take: 'ياخدهم', forwho: 'لأجلهم' };
+  const en_obj = g === 'female' ? 'her' : g === 'male' ? 'him' : 'them';
+
+  // "about Ali": the animal's name (or all the names) when every pet has one, otherwise him / her / them
+  const names = fieldsList.map((f) => (f && f.name ? String(f.name).trim() : '')).filter(Boolean);
+  const haveNames = names.length > 0 && names.length === fieldsList.length;
+  const aboutAr = haveNames ? 'عن ' + names.join(' و') : arForms.about;
+  const aboutEn = haveNames ? names.join(' and ') : en_obj;
+
+  const ar = `تمام شكراً كتير. احنا هلا عندنا كل المعلومات اللي بنحتاجها. فريق تبنّي رح يراجع كل شي ورح ينشر ${aboutAr} قريب جداً على الستوري.
 
 لطفاً تأكدوا انه اي حدا بيتواصل معكم شخص مسؤول، رح يهتم ${arForms.care} منيح و${arForms.take} على العيادة للفحص والتطعيمات.
 
-شكراً كتير على رعايتكم.`;
+شكراً لاهتمامكم ${arForms.care} واللي بتعملوه ${arForms.forwho}.`;
 
-  const en_obj = g === 'female' ? 'her' : g === 'male' ? 'him' : 'them';
-  const en = `Thank you for sharing all the details. We received everything and will post about ${en_obj} on our stories soon.
+  const en = `Okay, thank you very much. We now have all the information we need. The tabanni team will review everything and will post about ${aboutEn} very soon on our stories.
 
 Please make sure that whoever contacts you is a responsible person who will take good care of ${en_obj} and take ${en_obj} to the vet for a check-up and vaccinations.
 
-Thank you very much for your care.`;
+Thank you for caring about ${en_obj} and for everything you are doing for ${en_obj}.`;
 
   if (lang === 'ar') return ar;
   if (lang === 'en') return en;
@@ -578,6 +585,24 @@ function quotesPriceOrArranges(text) {
 const COST_HANDOFF_EN = 'Of course. I will get someone from the team to reply to you about this as soon as possible.';
 const COST_HANDOFF_AR = 'أكيد. رح أخلي حد من الفريق يرد عليكم بخصوص هاد الموضوع بأسرع وقت.';
 
+// --- Claude never closes an intake by itself ------------------------------------------
+// When everything has been collected, Claude outputs the [[INTAKE]] block and the system
+// sends the closing message and alerts the team. If Claude instead writes its own closing
+// ("we have all the information", "the team will post about X") WITHOUT the block, the team
+// is never told. The prompt forbids it; this is the safeguard behind it: the reply is
+// rewritten once, so Claude asks for what is missing or produces the block.
+const PREMATURE_CLOSING_PATTERNS = [
+  /(?:رح|راح)\s+(?:ينشر|ننشر|ينزل|ننزل)\s+عن/,
+  /(?:عندنا|وصلتنا|وصلنا|معنا)\s+كل\s+المعلومات/,
+  /\bwe (?:now )?(?:have|received|got) (?:all|everything)\b[^.!?\n]{0,50}\b(?:information|details|need)\b/i,
+  /\bwill post about\b/i,
+  /\bteam will (?:review|post)\b[^.!?\n]{0,70}\b(?:post|stor(?:y|ies))\b/i,
+];
+function closesWithoutIntake(rawReply, outgoing) {
+  if (parseAllIntakeMarkers(stripCollectingMarker(rawReply))) return false;
+  return PREMATURE_CLOSING_PATTERNS.some((re) => re.test(String(outgoing || '')));
+}
+
 // Wraps getClaudeReply with checks on the reply before it is sent, and ONE
 // automatic retry (with an explicit correction) if a check fails:
 //   - the reply is in the wrong language (a prompt instruction alone was not
@@ -602,8 +627,9 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
   const wordingProblems = findArabicWordingProblems(outgoing);
   const pricedOrArranged = quotesPriceOrArranges(outgoing);
   const calledAPartner = needsPartnerRewrite(outgoing);
+  const closedAlone = closesWithoutIntake(reply, outgoing);
 
-  if (!wrongLanguage && !callPromised && wordingProblems.length === 0 && !pricedOrArranged && !calledAPartner) return reply;
+  if (!wrongLanguage && !callPromised && wordingProblems.length === 0 && !pricedOrArranged && !calledAPartner && !closedAlone) return reply;
 
   const languageNames = { ar: 'Arabic', en: 'English' };
   const notes = [];
@@ -626,6 +652,10 @@ async function getVerifiedClaudeReply(history, baseNote = '') {
   if (calledAPartner) {
     console.log('⚠️ The reply called someone a partner — retrying once.');
     notes.push('CRITICAL CORRECTION: your previous reply called someone a partner. Nobody is tabanni\'s partner. Never use the words partner, partners, partnered, partnership, شريك, شركاء, شركائنا or شراكة about anyone. Vets are "vets in tabanni\'s network" (AR: عيادات ضمن شبكة تبنّي), and places that give temporary care are "places that provide temporary care for a fee" (AR: أماكن بتوفر الرعاية المؤقتة مقابل أجر). Rewrite your ENTIRE reply in the same language, keeping the same meaning and keeping any [[MARKER]] you used exactly as it was.');
+  }
+  if (closedAlone) {
+    console.log('⚠️ The reply closed an intake by itself, without the intake block — retrying once.');
+    notes.push('CRITICAL CORRECTION: your previous reply closed the conversation yourself (for example "we have all the information we need" or "the team will post about ...") without the [[INTAKE]] block. You must never do that. If every detail has been provided (including at least one photo), output the [[INTAKE]] block and nothing else after it. Otherwise ask for just the one thing that is still missing and say nothing about the team posting. Rewrite your ENTIRE reply in the same language as before.');
   }
   const combinedNote = [baseNote, ...notes].filter(Boolean).join('\n\n');
   const retryReply = await getClaudeReply(history, combinedNote);

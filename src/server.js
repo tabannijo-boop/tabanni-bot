@@ -51,9 +51,26 @@ function splitForInstagram(text, maxLen = INSTAGRAM_MAX_MESSAGE_LENGTH) {
   return chunks;
 }
 
+// --- Phone numbers inside Arabic messages ---------------------------------------------
+// A phone number written with spaces ("07 9501 3824") next to Arabic text is shown on the
+// phone as "3824 9501 07", because Arabic text reads right to left and the groups of
+// digits get reordered. An invisible "left-to-right mark" (U+200E) before and after the
+// number keeps it in order. It changes nothing you can see. Only Arabic messages need it,
+// and it is added right before sending, so every Arabic message is covered, including
+// the ones Claude writes.
+function protectPhoneNumbers(text) {
+  const t = String(text || '').replace(/\u200E/g, '');
+  if (!/[\u0600-\u06FF]/.test(t)) return t;
+  return t.replace(/(?<![\w\u200E])\+?\d[\d ]{5,}\d(?!\w)/g, (m) => {
+    const digits = m.replace(/\D/g, '').length;
+    return digits >= 7 && digits <= 15 ? '\u200E' + m + '\u200E' : m;
+  });
+}
+
 // Sends a (possibly long) reply to Instagram as one or more messages, and
 // marks every chunk's message ID so the bot recognizes its own echoes.
 async function sendInstagramReply(senderId, text) {
+  text = protectPhoneNumbers(text);
   const chunks = splitForInstagram(text);
   for (const chunk of chunks) {
     // Noted BEFORE sending as well as after: Instagram can echo the message
@@ -91,11 +108,11 @@ Please note, we are currently in a trial phase while testing this chatbot. If yo
 const WELCOME_AR = `مرحبًا، شكرًا لتواصلكم مع تبنّي. أنتم تتحدثون مع كرم، مساعد تبني الذكي الاصطناعي. سنرد في أقرب وقت ممكن.
 
 إذا كان الحيوان مريضًا جدًا، أو مصابًا، أو متسممًا، أو تعرض للإساءة أو الدهس، لطفاً تواصلوا مباشرة مع إحدى العيادات ضمن شبكة تبنّي ليتم فحصه بأسرع وقت، وقولوا انكم أخدتوا الرقم من تبني:
-Pets Corner (د. محمد بخيت)، وادي صقرة: 07 9835 5477
-First Pet، عبدون: 07 9501 3824
-First Pet، صويفية: 0797177835
-Petpark (د. ركان)، صويفية: 065866557
-Garden Sanctuary Veterinary Hospital: +962 6 412 9077
+\u200FPets Corner (د. محمد بخيت)، وادي صقرة: 07 9835 5477
+\u200FFirst Pet، عبدون: 07 9501 3824
+\u200FFirst Pet، صويفية: 0797177835
+\u200FPetpark (د. ركان)، صويفية: 065866557
+\u200FGarden Sanctuary Veterinary Hospital: +962 6 412 9077
 
 للإبلاغ عن حيوان مفقود أو عثر عليه: @tabanni.jordan.lostandfound
 
@@ -396,14 +413,16 @@ const BANNED_ARABIC_WORDS = {
   'هلق': 'هلأ',
   'هسع': 'هسا',
   'فهمنا': 'بنتفهم', // "we understood" is never used, see the prompt
+  'فاهمين': 'بنتفهم',
 };
 // A one-letter prefix (و ف ب ل, as in "وابغى" = "and I want") is also caught
 // for the words where that cannot clash with a real word.
-const WORDS_THAT_MAY_HAVE_A_PREFIX = new Set(['شنو', 'ابغى', 'وايد', 'فهمنا']);
+const WORDS_THAT_MAY_HAVE_A_PREFIX = new Set(['شنو', 'ابغى', 'وايد', 'فهمنا', 'فاهمين']);
 const BANNED_WORD_PATTERNS = Object.entries(BANNED_ARABIC_WORDS).map(([bad, good]) => {
   const prefix = WORDS_THAT_MAY_HAVE_A_PREFIX.has(bad) ? '([وفبل]?)' : '()';
   return [new RegExp(`(?<![${ARABIC_LETTERS}])${prefix}${bad}(?![${ARABIC_LETTERS}])`, 'g'), `$1${good}`];
 });
+const SINGULAR_ADDRESS_WORDS = ['معك', 'عندك', 'بدك', 'رأيك', 'رايك', 'اسمك', 'نساعدك', 'عليك', 'إلك', 'الك'];
 function fixArabicWording(text) {
   if (!/[\u0600-\u06FF]/.test(text)) return text;
   let out = text;
@@ -411,6 +430,10 @@ function fixArabicWording(text) {
   out = out.replace(/ها[يد]\s+رقمك(\s+صح)?\s*[؟?]/g, 'هاد رقم حضرتكم؟');
   out = out.replace(new RegExp(`(?<![${ARABIC_LETTERS}])رقمك(?![${ARABIC_LETTERS}])`, 'g'), 'رقمكم');
   for (const [pattern, replacement] of BANNED_WORD_PATTERNS) out = out.replace(pattern, replacement);
+  // Always the plural when addressing the person: معك -> معكم, عندك -> عندكم, ...
+  for (const w of SINGULAR_ADDRESS_WORDS) {
+    out = out.replace(new RegExp(`(?<![${ARABIC_LETTERS}])([وف]?)${w}(?![${ARABIC_LETTERS}])`, 'g'), (m, prefix) => `${prefix}${w}م`);
+  }
   if (out !== text) console.log('✏️ Corrected the wording of an Arabic reply before sending it.');
   return out;
 }
@@ -750,7 +773,7 @@ app.post('/api/test-chat', async (req, res) => {
       );
       await sendTelegramSpacer();
     }
-    res.json({ reply: welcomePrefix + fixPartnerWording(fixArabicWording(outgoingText), { generic: true }), handoff, intake });
+    res.json({ reply: protectPhoneNumbers(welcomePrefix + fixPartnerWording(fixArabicWording(outgoingText), { generic: true })), handoff, intake });
   } catch (err) {
     console.error('Test chat error:', err);
     res.status(500).json({ reply: "Something went wrong — check server logs.", handoff: false });
